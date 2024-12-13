@@ -1,0 +1,136 @@
+/**
+ * @author Eric Nguyen
+ * @ver Dec 13th, 2024
+ * Description: This script combines the grade letters for a student into 1 row on a new tab. 
+ * Depending on the size of the sheet, this could take a while so don't close the sheet under 
+ * operation.  You can do something else and let it run in the backgrounds.
+ * For any issues or updates needed, please ask Ai or a code savy person for instructions. 
+ * Kudos! 
+ */
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('Data Tools')
+    .addItem('Combine Student Data', 'combineStudentData')
+    .addToUi();
+}
+
+function combineStudentData() {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getActiveSheet();
+  const data = sheet.getDataRange().getValues();
+
+  // Get and validate the ID column
+  const idColumn = getValidatedColumnLetter('Enter Student ID Column Letter (e.g. A)');
+  if (!idColumn) {
+    ui.alert('Operation canceled.');
+    return;
+  }
+
+  // Get and validate the grade start column
+  const gradeStart = getValidatedColumnLetter('Enter Start Column for Grades (e.g. U)');
+  if (!gradeStart) {
+    ui.alert('Operation canceled.');
+    return;
+  }
+
+  // Get and validate the grade end column
+  const gradeEnd = getValidatedColumnLetter('Enter End Column for Grades (e.g. BM)', gradeStart);
+  if (!gradeEnd) {
+    ui.alert('Operation canceled.');
+    return;
+  }
+
+  // Convert column letters to indices (1-based to 0-based)
+  const idIndex = columnLetterToIndex(idColumn) - 1;
+  const gradeStartIndex = columnLetterToIndex(gradeStart) - 1;
+  const gradeEndIndex = columnLetterToIndex(gradeEnd) - 1;
+
+  const headers = data[0].slice(0, gradeEndIndex + 1);
+
+  // Build a map: student_id -> combined row
+  const result = {};
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    const id = row[idIndex];
+    if (id === '' || id === undefined) {
+      // skip rows without valid ID
+      continue;
+    }
+
+    if (!result[id]) {
+      // Initialize the row with empty strings
+      result[id] = Array(headers.length).fill('');
+      // Copy non-grade columns
+      for (let j = 0; j < gradeStartIndex; j++) {
+        result[id][j] = row[j];
+      }
+    }
+
+    // Update grade columns if not empty
+    for (let j = gradeStartIndex; j <= gradeEndIndex; j++) {
+      if (row[j]) {
+        result[id][j] = row[j];
+      }
+    }
+  }
+
+  // Prepare the "Combined Data" sheet
+  let newSheet = ss.getSheetByName('Combined Data');
+  if (newSheet) {
+    ss.deleteSheet(newSheet);
+  }
+  newSheet = ss.insertSheet('Combined Data');
+  newSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+
+  // Convert result object into an array for setValues()
+  const combinedData = [];
+  for (const id in result) {
+    combinedData.push(result[id]);
+  }
+
+  if (combinedData.length > 0) {
+    newSheet.getRange(2, 1, combinedData.length, headers.length).setValues(combinedData);
+  }
+
+  ui.alert('Data combined successfully into "Combined Data" sheet.');
+}
+
+// Helper: Convert column letter to index (A=1, B=2, ..., Z=26, AA=27, etc.)
+function columnLetterToIndex(letter) {
+  let column = 0;
+  for (let i = 0; i < letter.length; i++) {
+    column = column * 26 + (letter.charCodeAt(i) - 64);
+  }
+  return column;
+}
+
+// Helper: Prompt user for a column letter and validate
+// If 'minColumn' is provided, ensure the column entered is >= minColumn.
+function getValidatedColumnLetter(promptMessage, minColumn) {
+  const ui = SpreadsheetApp.getUi();
+  while (true) {
+    const response = ui.prompt(promptMessage, ui.ButtonSet.OK_CANCEL);
+    if (response.getSelectedButton() != ui.Button.OK) {
+      // User canceled
+      return null;
+    }
+
+    const columnLetter = response.getResponseText().toUpperCase().trim();
+    
+    // Validate that the input is letters only
+    if (!/^[A-Z]+$/.test(columnLetter)) {
+      ui.alert('Invalid input. Please enter a valid column letter (e.g., A, B, AA, AB).');
+      continue;
+    }
+
+    // If a minimum column is specified, ensure the entered column is not before that
+    if (minColumn && columnLetterToIndex(columnLetter) < columnLetterToIndex(minColumn)) {
+      ui.alert(`End column must be after or the same as ${minColumn}. Please try again.`);
+      continue;
+    }
+
+    return columnLetter;
+  }
+}
+
