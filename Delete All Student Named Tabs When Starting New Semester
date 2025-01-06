@@ -1,0 +1,37 @@
+function deleteNonSingleLetterSheets() {
+  // List of spreadsheet IDs with their corresponding labels
+// Replace with Sheet IDs, The IDs are the unique parts of the URLs that appear after /d/ and before /edit . 
+  const spreadsheets = {
+    "A-B": "1pJwsnD0ZMAcQqWdHsR50n_WNqKnw6QbfMMUrrCozRKY",
+    "C-D": "1oCmx117cWkHEJ7-jI83sAsnBPV1aOqadec8hvCH5pVc",
+    "E-F": "10fYzN-V5PwPsJICpZ7_wEzO6Wto6qptKmU16EiSnd8M",
+    "G-H": "1-k4Wxk4-gy4R6WMksj0hgknZT7atyWGw08V2sweeF6U",
+    "I-J": "1RKk1tmjNkK_ej1FfiGoAbg6TEyBqwjl_g7EnFxvHApU",
+    "K-L": "1OL-jtdJRWr160Qnw4i1mIIBv_2mJ_41RcDy-2YuRUC8",
+    "M-N": "14T6XRXEr0DiyM2-4j38Mn7bjYOSun9mfsm5ovtYXtK4",
+    "O-P": "1_fZUzpKIP9yaCb3Wf6gtf8PsPl2RVqfivn2hRnfNO5A",
+    "Q-R": "1ph7JEdLOKxnBNqXbS9T4x7rHJr73bT4wKvGrqJzYzQg",
+    "S-T": "1RYHrjF6wwEykB-gOgNJGjIWr8_UcMqMl7jzfGkIT9s0",
+    "U-V": "1Rt6skOHPupIGny3Sz1eQ9TPir4R_W2lQJRJqsq147ao",
+    "W-X": "1LDNwL4buMMuRY7B8gGj3rH3yYsXcCJaURq5fTBNmIok",
+    "Y-Z": "1NRciVHOi0mM5ADvYEAL2AstMnRWCvHbU26slH0QpPBY"
+  };
+
+  // Loop through each spreadsheet
+  for (const [label, id] of Object.entries(spreadsheets)) {
+    const ss = SpreadsheetApp.openById(id);
+    const sheets = ss.getSheets();
+
+    sheets.forEach(sheet => {
+      const sheetName = sheet.getName();
+      // Check if the sheet name is NOT a single uppercase letter
+      if (!/^[A-Z]$/.test(sheetName)) {
+        ss.deleteSheet(sheet);
+      }
+    });
+
+    Logger.log(`Processed spreadsheet: ${label}`);
+  }
+
+  SpreadsheetApp.getUi().alert("Non-single-letter tabs have been deleted in all spreadsheets.");
+}
