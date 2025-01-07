@@ -5,7 +5,7 @@
  * Depending on the size of the sheet, this could take a while so don't close the sheet under 
  * operation.  You can do something else and let it run in the backgrounds.
  * For any issues or updates needed, please ask Ai or a code savy person for instructions. 
- * Kudos! 
+ * Goodluck! 
  */
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
