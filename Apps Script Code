@@ -19,7 +19,7 @@
  *  - getSheetIdForLastName: Determines the target spreadsheet ID based on the student's last name initial.
  *  - sanitizeSheetName: Cleans up the sheet name to comply with Google Sheets naming rules.
  *  - getSheetByNameCaseInsensitive: Finds a sheet by name in a case-insensitive manner.
- *  - addBoilerplate: Inserts a pre-defined template into each new sheet and applies formulas and formatting.
+ *  - addBoilerplate: Inserts a pre-defined template into each new sheet and applies formulas, formatting, and an image.
  *  - sortSheetsAlphabetically: Sorts the sheets in the target spreadsheet alphabetically using the Sheets API.
  * 
  * Instructions:
@@ -107,11 +107,12 @@ function processSelectedRows(rows) {
  */
 function processStudentDataFromSheet(sheet, row) {
   // Adjust the column indices based on your sheet's structure
+  // (timestampCol is provided but not necessarily used here)
   const timestampCol = 1;          // Column A
   const emailCol = 2;              // Column B
   const fullNameCol = 3;           // Column C
   const studentIdCol = 4;          // Column D
-  const programResponseCol = 15;    // Column O
+  const programResponseCol = 15;   // Column O
 
   const rowData = sheet.getRange(row, 1, 1, sheet.getLastColumn()).getValues()[0];
   
@@ -120,7 +121,7 @@ function processStudentDataFromSheet(sheet, row) {
   const studentId = rowData[studentIdCol - 1];
   let programResponse = rowData[programResponseCol - 1];
 
-  // Assign default value if programResponse is undefined or empty
+  // Assign default if programResponse is undefined or empty
   if (typeof programResponse !== 'string' || programResponse.trim() === '') {
     programResponse = 'NOT ENROLLED IN ANY OF THE ABOVE PROGRAMS';
   }
@@ -159,32 +160,32 @@ function processStudentData(fullName, studentId, email, programResponse) {
 
   // List of target spreadsheet IDs (update with your actual IDs)
   var sheetIds = {
-    'A': 'INSERT SHEET ID HERE',
-    'B': 'INSERT SHEET ID HERE',
-    'C': 'INSERT SHEET ID HERE',
-    'D': 'INSERT SHEET ID HERE',
-    'E': 'INSERT SHEET ID HERE',
-    'F': 'INSERT SHEET ID HERE',
-    'G': 'INSERT SHEET ID HERE',
-    'H': 'INSERT SHEET ID HERE',
-    'I': 'INSERT SHEET ID HERE',
-    'J': 'INSERT SHEET ID HERE',
-    'K': 'INSERT SHEET ID HERE',
-    'L': 'INSERT SHEET ID HERE',
-    'M': 'INSERT SHEET ID HERE',
-    'N': 'INSERT SHEET ID HERE',
-    'O': 'INSERT SHEET ID HERE',
-    'P': 'INSERT SHEET ID HERE',
-    'Q': 'INSERT SHEET ID HERE',
-    'R': 'INSERT SHEET ID HERE',
-    'S': 'INSERT SHEET ID HERE',
-    'T': 'INSERT SHEET ID HERE',
-    'U': 'INSERT SHEET ID HERE',
-    'V': 'INSERT SHEET ID HERE',
-    'W': 'INSERT SHEET ID HERE',
-    'X': 'INSERT SHEET ID HERE',
-    'Y': 'INSERT SHEET ID HERE',
-    'Z': 'INSERT SHEET ID HERE'
+    'A': '1pJwsnD0ZMAcQqWdHsR50n_WNqKnw6QbfMMUrrCozRKY',
+    'B': '1pJwsnD0ZMAcQqWdHsR50n_WNqKnw6QbfMMUrrCozRKY',
+    'C': '1oCmx117cWkHEJ7-jI83sAsnBPV1aOqadec8hvCH5pVc',
+    'D': '1oCmx117cWkHEJ7-jI83sAsnBPV1aOqadec8hvCH5pVc',
+    'E': '10fYzN-V5PwPsJICpZ7_wEzO6Wto6qptKmU16EiSnd8M',
+    'F': '10fYzN-V5PwPsJICpZ7_wEzO6Wto6qptKmU16EiSnd8M',
+    'G': '1-k4Wxk4-gy4R6WMksj0hgknZT7atyWGw08V2sweeF6U',
+    'H': '1-k4Wxk4-gy4R6WMksj0hgknZT7atyWGw08V2sweeF6U',
+    'I': '1RKk1tmjNkK_ej1FfiGoAbg6TEyBqwjl_g7EnFxvHApU',
+    'J': '1RKk1tmjNkK_ej1FfiGoAbg6TEyBqwjl_g7EnFxvHApU',
+    'K': '1OL-jtdJRWr160Qnw4i1mIIBv_2mJ_41RcDy-2YuRUC8',
+    'L': '1OL-jtdJRWr160Qnw4i1mIIBv_2mJ_41RcDy-2YuRUC8',
+    'M': '14T6XRXEr0DiyM2-4j38Mn7bjYOSun9mfsm5ovtYXtK4',
+    'N': '14T6XRXEr0DiyM2-4j38Mn7bjYOSun9mfsm5ovtYXtK4',
+    'O': '1_fZUzpKIP9yaCb3Wf6gtf8PsPl2RVqfivn2hRnfNO5A',
+    'P': '1_fZUzpKIP9yaCb3Wf6gtf8PsPl2RVqfivn2hRnfNO5A',
+    'Q': '1ph7JEdLOKxnBNqXbS9T4x7rHJr73bT4wKvGrqJzYzQg',
+    'R': '1ph7JEdLOKxnBNqXbS9T4x7rHJr73bT4wKvGrqJzYzQg',
+    'S': '1RYHrjF6wwEykB-gOgNJGjIWr8_UcMqMl7jzfGkIT9s0',
+    'T': '1RYHrjF6wwEykB-gOgNJGjIWr8_UcMqMl7jzfGkIT9s0',
+    'U': '1Rt6skOHPupIGny3Sz1eQ9TPir4R_W2lQJRJqsq147ao',
+    'V': '1Rt6skOHPupIGny3Sz1eQ9TPir4R_W2lQJRJqsq147ao',
+    'W': '1LDNwL4buMMuRY7B8gGj3rH3yYsXcCJaURq5fTBNmIok',
+    'X': '1LDNwL4buMMuRY7B8gGj3rH3yYsXcCJaURq5fTBNmIok',
+    'Y': '1NRciVHOi0mM5ADvYEAL2AstMnRWCvHbU26slH0QpPBY',
+    'Z': '1NRciVHOi0mM5ADvYEAL2AstMnRWCvHbU26slH0QpPBY'
   };
 
   // Determine the appropriate sheet ID based on the last name initial
@@ -212,7 +213,7 @@ function processStudentData(fullName, studentId, email, programResponse) {
     // Ensure the sheet is fully initialized
     SpreadsheetApp.flush();
 
-    // Proceed with adding boilerplate
+    // Proceed with adding boilerplate (including the image)
     addBoilerplate(newSheet, fullName, studentId, email, programResponse);
 
     // Sort sheets alphabetically
@@ -270,7 +271,8 @@ function getSheetByNameCaseInsensitive(spreadsheet, name) {
 }
 
 /**
- * Inserts a pre-defined template into each new sheet and applies formulas and formatting.
+ * Inserts a pre-defined template into each new sheet and applies formulas, formatting, 
+ * and an image at H31.
  */
 function addBoilerplate(sheet, fullName, studentId, email, programResponse) {
   try {
@@ -280,7 +282,7 @@ function addBoilerplate(sheet, fullName, studentId, email, programResponse) {
     var membershipMessage = getMembershipMessage(programResponse);
     Logger.log('Membership Message: ' + membershipMessage);
 
-    // Define the layout for the first part (3 columns from row 1 to 19)
+    // -- PART 1 Layout (3 columns, rows 1-19)
     var dataPart1 = [
       ['Name', '', fullName],
       ['ID NO.', '', studentId],
@@ -303,70 +305,62 @@ function addBoilerplate(sheet, fullName, studentId, email, programResponse) {
       ['', '', '']   // Empty row for spacing
     ];
 
-    // Define the layout for the second part (6 columns from row 20 onwards)
+    // -- PART 2 Layout (6 columns, starting row 20)
     var dataPart2 = [
       ['SOCIETY/ORG', 'QUAL UNITS', 'QUAL GPA', 'QUAL LEVEL', 'HP ONLY - ENGL', 'NOTES'],
-      ['HONORS PROGRAM', '', '', '', '', ''],  // 21A-F
-      ['ABG', '', '', '', '', ''],  // 22A-F
-      ['AGS', '', '', '', '', ''],  // 23A-F
-      ['AMG', '', '', '', '', ''],  // 24A-F
-      ['EEO', '', '', '', '', ''],  // 25A-F
-      ['MAT', '', '', '', '', ''],  // 26A-F
-      ['MDR', '', '', '', '', ''],  // 27A-F
-      ['NTHS', '', '', '', '', ''],  // 28A-F
-      ['OPS', '', '', '', '', ''],  // 29A-F
-      ['PAM', '', '', '', '', ''],  // 30A-F
-      ['PTK', '', '', '', '', ''],  // 31A-F
-      ['PRS', '', '', '', '', ''],  // 32A-F
-      ['PTE', '', '', '', '', ''],  // 33A-F
-      ['PB', '', '', '', '', ''],  // 34A-F
-      ['SAL', '', '', '', '', ''],  // 35A-F
-      ['SCE', '', '', '', '', ''],  // 36A-F
-      ['SKD', '', '', '', '', ''],  // 37A-F
-      ['IX', '', '', '', '', '']  // 38A-F
+      ['HONORS PROGRAM', '', '', '', '', ''],
+      ['ABG', '', '', '', '', ''],
+      ['AGS', '', '', '', '', ''],
+      ['AMG', '', '', '', '', ''],
+      ['EEO', '', '', '', '', ''],
+      ['MAT', '', '', '', '', ''],
+      ['MDR', '', '', '', '', ''],
+      ['NTHS', '', '', '', '', ''],
+      ['OPS', '', '', '', '', ''],
+      ['PAM', '', '', '', '', ''],
+      ['PTK', '', '', '', '', ''],
+      ['PRS', '', '', '', '', ''],
+      ['PTE', '', '', '', '', ''],
+      ['PB', '', '', '', '', ''],
+      ['SAL', '', '', '', '', ''],
+      ['SCE', '', '', '', '', ''],
+      ['SKD', '', '', '', '', ''],
+      ['IX', '', '', '', '', '']
     ];
 
-    // Set the first part (rows 1-19, 3 columns)
+    // Place data for Part 1 (rows 1-19, 3 columns)
     sheet.getRange(1, 1, dataPart1.length, dataPart1[0].length).setValues(dataPart1);
 
-    // Set the second part (rows 20 onwards, 6 columns)
+    // Place data for Part 2 (rows 20+, 6 columns)
     sheet.getRange(20, 1, dataPart2.length, dataPart2[0].length).setValues(dataPart2);
 
-    // Apply formatting for bold in column A
+    // Basic formatting
     var totalRows = dataPart1.length + dataPart2.length;
+    // Bold column A
     sheet.getRange(1, 1, totalRows, 1).setFontWeight('bold');
-
-    // Bold the header row for the second part (row 20)
+    // Bold the header row of Part 2 (row 20)
     sheet.getRange(20, 1, 1, dataPart2[0].length).setFontWeight('bold');
-
-    // Set the width of column A to 200 pixels
+    // Set column A width
     sheet.setColumnWidth(1, 200);
-
-    // Right-align the contents of column A for all rows
+    // Right-align column A
     sheet.getRange(1, 1, totalRows, 1).setHorizontalAlignment('right');
-
-    // Format OCC GPA (C8)
+    // Format OCC GPA
     sheet.getRange(8, 3).setNumberFormat('0.00');
-
-    // Format OTHER GPA (C11)
+    // Format OTHER GPA
     sheet.getRange(11, 3).setNumberFormat('0.00');
-
-    // Format COMBINED GPA (C14)
+    // Format COMBINED GPA
     sheet.getRange(14, 3).setNumberFormat('0.00');
+    // Format QUAL GPA for rows 21+ in column C
+    var dataPart2RowStart = 21;
+    var qualGpaColumn = 3;
+    var numberOfDataPart2Rows = dataPart2.length - 1; 
+    sheet.getRange(dataPart2RowStart + 1, qualGpaColumn, numberOfDataPart2Rows, 1)
+         .setNumberFormat('0.00');
 
-    // Format QUAL GPA in Part 2 (Column C, Rows 21 onwards)
-    var dataPart2RowStart = 21; // Rows start at 1, header is at row 20
-    var qualGpaColumn = 3; // Column C
-    var numberOfDataPart2Rows = dataPart2.length - 1; // Exclude header row
+    // --- Additional Sections ---
 
-    sheet.getRange(dataPart2RowStart + 1, qualGpaColumn, numberOfDataPart2Rows, 1).setNumberFormat('0.00');
-
-    // --- New Sections Added Below ---
-
-    // Set H20 to "NE/NQ CODES" (bold)
+    // NE/NQ Codes at H20
     sheet.getRange('H20').setValue('NE/NQ CODES').setFontWeight('bold');
-
-    // Define the NE/NQ Codes data
     var dataNENQCodes = [
       ['1', 'NOT ENOUGH QUALIFYING COURSEWORK'],
       ['2', 'CUM GPA TOO LOW'],
@@ -377,62 +371,55 @@ function addBoilerplate(sheet, fullName, studentId, email, programResponse) {
       ['7', 'NOT A VET'],
       ['8', '']
     ];
-
-    // Set the data starting from I21 (Column I is the 9th column)
     sheet.getRange(21, 9, dataNENQCodes.length, 2).setValues(dataNENQCodes);
-
-    // Bold the codes and descriptions
     sheet.getRange(21, 9, dataNENQCodes.length, 2).setFontWeight('bold');
-
-    // Right-align cells I21 to I28
+    // Right-align the codes in column I
     sheet.getRange(21, 9, dataNENQCodes.length, 1).setHorizontalAlignment('right');
 
-    // Set H30 to "BASIC ELIGIBILITY CRITERIA" (bold)
-    sheet.getRange('H30').setValue('BASIC ELIGIBILITY CRITERIA').setFontWeight('bold');
+    // Basic Eligibility Criteria at H30
+    // sheet.getRange('H30').setValue('BASIC ELIGIBILITY CRITERIA').setFontWeight('bold');
+    // // Headers in row 31 (I-L)
+    // var headers = ['Org', 'OCC Enrollment', 'Minimum Units Completed', 'Minimum GPA'];
+    // sheet.getRange(31, 9, 1, headers.length).setValues([headers]).setFontWeight('bold');
+    // // Data from row 32 onward
+    // var dataEligibilityCriteria = [
+    //   ['HP', 'Enrolled', '12 college', ''],
+    //   ['ABG', 'Enrolled', '12 college at Assoc. level', '3.0 min. cum GPA'],
+    //   ['AGS (INITIAL)', 'Enrolled', '12 college over most recent 3 semesters attended', '3.0 min. cum GPA'],
+    //   ['AGS (CONTINUING)', 'Enrolled', '6 college in previous semester', '3.0 min. semester GPA and min. cum GPA'],
+    //   ['AGS (GRACE)', 'Enrolled', 'Fewer than 6 college or semester/cum GPA below 3.0; must follow a CONT. semester', ''],
+    //   ['AGS (PERMANENT)', 'Enrolled', 'At least 6 college in previous semester; at least 60 will be completed by end of current semester with at least 30 at OCC; 3.0 min. semester GPA + 3.25 min. cum GPA...', ''],
+    //   ['AMG', 'Enrolled', '12 college EXCLUDING language courses used to qualify', ''],
+    //   ['EEO', 'Enrolled', '6 OCC units', ''],
+    //   ['IX', 'Enrolled', '12 college', ''],
+    //   ['MAT', 'Enrolled', '12 OCC', ''],
+    //   ['MDR', '6 units', '12 college', ''],
+    //   ['NTHS', 'Enrolled', '12 OCC', ''],
+    //   ['OPS', 'Enrolled', '12 OCC', ''],
+    //   ['PAM', 'Enrolled', '12 OCC', ''],
+    //   ['PTK', 'Enrolled', '12 college at Assoc. level', ''],
+    //   ['PRS', 'Enrolled', '12 OCC', ''],
+    //   ['PTE', 'Enrolled', '12 college', ''],
+    //   ['PAL', 'Enrolled', '12 OCC', ''],
+    //   ['SAL', 'Enrolled', '12 OCC', '']
+    // ];
+    // sheet.getRange(32, 9, dataEligibilityCriteria.length, 4).setValues(dataEligibilityCriteria);
+    // // Bold the "Org" column
+    // sheet.getRange(32, 9, dataEligibilityCriteria.length, 1).setFontWeight('bold');
+    // // Adjust column widths
+    // sheet.setColumnWidth(9, 120);  // Column I
+    // sheet.setColumnWidth(10, 150); // Column J
+    // sheet.setColumnWidth(11, 200); // Column K
+    // sheet.setColumnWidth(12, 250); // Column L
+    // // Wrap text
+    // sheet.getRange(31, 9, dataEligibilityCriteria.length + 1, 4).setWrap(true);
 
-    // Set the headers in row 31 (Columns I to L)
-    var headers = ['Org', 'OCC Enrollment', 'Minimum Units Completed', 'Minimum GPA'];
-    sheet.getRange(31, 9, 1, headers.length).setValues([headers]).setFontWeight('bold');
-
-    // Define the eligibility criteria data starting from row 32
-    var dataEligibilityCriteria = [
-      ['HP', 'Enrolled', '12 college', ''],
-      ['ABG', 'Enrolled', '12 college at Assoc. level', '3.0 min. cum GPA'],
-      ['AGS (INITIAL)', 'Enrolled', '12 college over most recent 3 semesters attended', '3.0 min. cum GPA'],
-      ['AGS (CONTINUING)', 'Enrolled', '6 college in previous semester', '3.0 min. semester GPA and min. cum GPA'],
-      ['AGS (GRACE)', 'Enrolled', 'Fewer than 6 college or semester/cum GPA below 3.0; must follow a CONT. semester', ''],
-      ['AGS (PERMANENT)', 'Enrolled', 'At least 6 college in previous semester; at least 60 will be completed by end of current semester with at least 30 at OCC; 3.0 min. semester GPA + 3.25 min. cum GPA with at least 2 semesters of previous membership; OR 3.0 min. semester GPA + 3.50 min. cum GPA with one previous semester of membership (INITIAL)', ''],
-      ['AMG', 'Enrolled', '12 college EXCLUDING language courses used to qualify for membership', ''],
-      ['EEO', 'Enrolled', '6 OCC units', ''],
-      ['IX', 'Enrolled', '12 college', ''],
-      ['MAT', 'Enrolled', '12 OCC', ''],
-      ['MDR', '6 units', '12 college', ''],
-      ['NTHS', 'Enrolled', '12 OCC', ''],
-      ['OPS', 'Enrolled', '12 OCC', ''],
-      ['PAM', 'Enrolled', '12 OCC', ''],
-      ['PTK', 'Enrolled', '12 college at Assoc. level', ''],
-      ['PRS', 'Enrolled', '12 OCC', ''],
-      ['PTE', 'Enrolled', '12 college', ''],
-      ['PAL', 'Enrolled', '12 OCC', ''],
-      ['SAL', 'Enrolled', '12 OCC', '']
-    ];
-
-    // Set the data starting from row 32, columns I to L
-    sheet.getRange(32, 9, dataEligibilityCriteria.length, 4).setValues(dataEligibilityCriteria);
-
-    // Bold the Org values in column I (column 9)
-    sheet.getRange(32, 9, dataEligibilityCriteria.length, 1).setFontWeight('bold');
-
-    // Adjust column widths to accommodate content
-    sheet.setColumnWidth(9, 120);   // Column I
-    sheet.setColumnWidth(10, 150);  // Column J
-    sheet.setColumnWidth(11, 200);  // Column K
-    sheet.setColumnWidth(12, 250);  // Column L
-
-    // Wrap text in columns where text may be long
-    sheet.getRange(31, 9, dataEligibilityCriteria.length + 1, 4).setWrap(true);
-
-    // --- End of New Sections ---
+    // --- Insert the image at H31 ---
+    // Replace this file ID with your actual Google Drive image file ID
+    var imageFileId = '1FRDvHAFok-aM0NKWHHj_pybKV0X8N8Bo';
+    var imageBlob = DriveApp.getFileById(imageFileId).getBlob();
+    // Column H = 8, Row 31 is row 31
+    sheet.insertImage(imageBlob, 8, 31).setWidth(804).setHeight(590);
 
     Logger.log('Boilerplate added to sheet: ' + sheet.getName());
   } catch (error) {
@@ -441,20 +428,17 @@ function addBoilerplate(sheet, fullName, studentId, email, programResponse) {
   }
 }
 
-
 /**
  * Determines the membership message based on the student's program response.
  */
 function getMembershipMessage(programResponse) {
   // Normalize the response string for comparison
   var normalizedResponse = programResponse.trim().toUpperCase();
-
   // Remove punctuation and extra spaces
   normalizedResponse = normalizedResponse.replace(/[^\w\s]/gi, '').replace(/\s+/g, ' ');
-
   Logger.log('Normalized Program Response: ' + normalizedResponse);
 
-  // Define keywords to search for in the normalized response
+  // Mapping of keywords to membership messages
   var responseMapping = [
     { keywords: ['EOPS'], message: 'EOPS' },
     { keywords: ['GUARDIAN SCHOLARS'], message: 'Guardian Scholars' },
@@ -466,7 +450,7 @@ function getMembershipMessage(programResponse) {
     { keywords: ['NOT ENROLLED', 'NONE OF THE ABOVE'], message: 'SELF' }
   ];
 
-  // Iterate through the mapping to find a matching payor
+  // Check for keywords
   for (var i = 0; i < responseMapping.length; i++) {
     var entry = responseMapping[i];
     for (var j = 0; j < entry.keywords.length; j++) {
@@ -476,8 +460,7 @@ function getMembershipMessage(programResponse) {
       }
     }
   }
-
-  // If no match is found, default to 'SELF'
+  // Default to SELF
   return 'SELF';
 }
 
@@ -501,30 +484,30 @@ function sortSheetsAlphabetically(spreadsheet) {
 
   Logger.log('Current sheet properties: ' + JSON.stringify(sheetProperties));
 
-  // Sort the sheet properties by title
-  sheetProperties.sort(function (a, b) {
+  // Sort by title
+  sheetProperties.sort(function(a, b) {
     return a.title.localeCompare(b.title);
   });
 
   Logger.log('Sorted sheet properties: ' + JSON.stringify(sheetProperties));
 
-  // Prepare requests to update the sheet order
-  var requests = sheetProperties.map(function (sheetProp, index) {
+  // Prepare requests for batchUpdate
+  var requests = sheetProperties.map(function(sheetProp, index) {
     return {
       updateSheetProperties: {
         properties: {
           sheetId: sheetProp.sheetId,
-          index: index,
+          index: index
         },
-        fields: 'index',
-      },
+        fields: 'index'
+      }
     };
   });
 
-  // Execute batch update using the Sheets API
+  // Execute Sheets API batchUpdate
   Sheets.Spreadsheets.batchUpdate(
     {
-      requests: requests,
+      requests: requests
     },
     spreadsheetId
   );
