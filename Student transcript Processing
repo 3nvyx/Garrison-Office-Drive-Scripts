@@ -1,0 +1,1332 @@
+const DEBUG = false;
+const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes in milliseconds
+let CACHED_CATALOG_MAP = null;
+let CATALOG_LAST_UPDATED = null;
+
+const MAX_RETRIES = 3;
+const MAX_BACKOFF_MS = 8000;
+
+function wait(ms) { Utilities.sleep(ms); }
+function getBackoffTime(attempt) { return Math.min(1000 * Math.pow(2, attempt), MAX_BACKOFF_MS); }
+
+const SHEET_ID_RANGES = [
+  { range: ['A', 'B'], id: '1pJwsnD0ZMAcQqWdHsR50n_WNqKnw6QbfMMUrrCozRKY' },
+  { range: ['C', 'D'], id: '1oCmx117cWkHEJ7-jI83sAsnBPV1aOqadec8hvCH5pVc' },
+  { range: ['E', 'F'], id: '10fYzN-V5PwPsJICpZ7_wEzO6Wto6qptKmU16EiSnd8M' },
+  { range: ['G', 'H'], id: '1-k4Wxk4-gy4R6WMksj0hgknZT7atyWGw08V2sweeF6U' },
+  { range: ['I', 'J'], id: '1RKk1tmjNkK_ej1FfiGoAbg6TEyBqwjl_g7EnFxvHApU' },
+  { range: ['K', 'L'], id: '1OL-jtdJRWr160Qnw4i1mIIBv_2mJ_41RcDy-2YuRUC8' },
+  { range: ['M', 'N'], id: '14T6XRXEr0DiyM2-4j38Mn7bjYOSun9mfsm5ovtYXtK4' },
+  { range: ['O', 'P'], id: '1_fZUzpKIP9yaCb3Wf6gtf8PsPl2RVqfivn2hRnfNO5A' },
+  { range: ['Q', 'R'], id: '1ph7JEdLOKxnBNqXbS9T4x7rHJr73bT4wKvGrqJzYzQg' },
+  { range: ['S', 'T'], id: '1RYHrjF6wwEykB-gOgNJGjIWr8_UcMqMl7jzfGkIT9s0' },
+  { range: ['U', 'V'], id: '1Rt6skOHPupIGny3Sz1eQ9TPir4R_W2lQJRJqsq147ao' },
+  { range: ['W', 'X'], id: '1LDNwL4buMMuRY7B8gGj3rH3yYsXcCJaURq5fTBNmIok' },
+  { range: ['Y', 'Z'], id: '1NRciVHOi0mM5ADvYEAL2AstMnRWCvHbU26slH0QpPBY' }
+];
+// Create the SHEET_IDS mapping dynamically
+const SHEET_IDS = SHEET_ID_RANGES.reduce((acc, { range, id }) => {
+  range.forEach(letter => {
+    acc[letter] = id;
+  });
+  return acc;
+}, {});
+const TOKENS_PER_MINUTE_LIMIT = 200000;
+
+class TokenBucket {
+  constructor(tokensPerMinute) {
+    this.maxTokens = tokensPerMinute;     
+    this.tokens = tokensPerMinute;        
+    this.lastRefill = Date.now();         
+  }
+
+  getTokens(amount) {
+    this.refill();
+    if (this.tokens >= amount) {
+      this.tokens -= amount;
+      return true;
+    }
+    return false;
+  }
+
+  refill() {
+    const now = Date.now();
+    const timePassed = now - this.lastRefill;
+    const refillAmount = Math.floor(timePassed * (this.maxTokens / 60000));
+    this.tokens = Math.min(this.maxTokens, this.tokens + refillAmount);
+    this.lastRefill = now;
+  }
+
+  waitForTokens(amount) {
+    while (true) {
+      this.refill();
+      if (this.tokens >= amount) {
+        this.tokens -= amount;
+        return;
+      }
+      const deficit = amount - this.tokens;
+      const waitTimeMs = (deficit / this.maxTokens) * 60000;
+      const actualWait = Math.min(waitTimeMs, 10000);
+      console.log(`Waiting ${actualWait}ms for ${deficit} tokens`);
+      Utilities.sleep(actualWait);
+    }
+  }
+}
+
+const tokenBucket = new TokenBucket(TOKENS_PER_MINUTE_LIMIT);
+
+/*************************************************************
+ * 0) showRowsPrompt
+ *************************************************************/
+function showRowsPrompt() {
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.prompt(
+    'Process Multiple Rows for Transcript Report',
+    'Enter row numbers or ranges, e.g. "2,5-7":',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (response.getSelectedButton() !== ui.Button.OK) {
+    ui.alert('Canceled.');
+    return;
+  }
+
+  const rowsInput = response.getResponseText().trim();
+  if (!rowsInput) {
+    ui.alert('No rows provided. Aborting.');
+    return;
+  }
+  const rows = parseRowsInput(rowsInput);
+  if (!rows.length) {
+    ui.alert('No valid rows found. Aborting.');
+    return;
+  }
+
+  // Simple estimate: 30 sec/row
+  const estimateSec = rows.length * 30;
+  const confirm = ui.alert(
+    `You asked to process ${rows.length} row(s).\nEstimated time ~ ${estimateSec} seconds.\nProceed?`,
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (confirm !== ui.Button.OK) {
+    ui.alert('Canceled.');
+    return;
+  }
+
+  const summary = processMultipleRows(rows);
+  ui.alert(summary);
+}
+
+/*************************************************************
+ * processMultipleRows
+ *************************************************************/
+function processMultipleRows(rows) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const successes = [];
+  const errors = [];
+  const t0 = Date.now();
+  const timings = {
+    rowTimes: [],
+    startTime: t0,
+    getStats() {
+      if (this.rowTimes.length === 0) return null;
+      const avg = this.rowTimes.reduce((a, b) => a + b, 0) / this.rowTimes.length;
+      const max = Math.max(...this.rowTimes);
+      const min = Math.min(...this.rowTimes);
+      return {
+        average: avg.toFixed(1),
+        max: max.toFixed(1),
+        min: min.toFixed(1),
+        totalTime: ((Date.now() - this.startTime) / 1000).toFixed(1)
+      };
+    }
+  };
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const rowStart = Date.now();
+
+    try {
+      // Read the PDF link from column J
+      const link = sheet.getRange(row, 10).getValue().toString().trim();
+      if (!link) throw new Error('No link in column ');
+
+      // Process that row's transcript in a helper
+      processSingleTranscriptRow(sheet, row, link);
+
+      successes.push(row);
+      const rowTime = (Date.now() - rowStart) / 1000;
+      timings.rowTimes.push(rowTime);
+
+      const rowsDone = i + 1;
+      const rowsLeft = rows.length - rowsDone;
+      const avgTimePerRow = timings.rowTimes.reduce((a, b) => a + b, 0) / rowsDone;
+      const estimatedTimeLeft = avgTimePerRow * rowsLeft;
+      const percentComplete = ((rowsDone / rows.length) * 100).toFixed(1);
+
+      console.log(
+        `Row ${row} completed in ${rowTime.toFixed(1)}s\n` +
+        `Progress: ${rowsDone}/${rows.length} (${percentComplete}%)\n` +
+        `Average time per row: ${avgTimePerRow.toFixed(1)}s\n` +
+        `Estimated time remaining: ${estimatedTimeLeft.toFixed(1)}s`
+      );
+
+    } catch (err) {
+      errors.push(`Row ${row}: ${err.message}`);
+    }
+  }
+
+  // Get final timing statistics
+  const stats = timings.getStats();
+
+  // Build detailed summary message
+  let msg = `Processing Summary:\n` +
+            `Total rows processed: ${rows.length}\n` +
+            `Successful: ${successes.length}\n` +
+            `Failed: ${errors.length}\n\n`;
+
+  if (stats) {
+    msg += `Timing Statistics:\n` +
+           `Total time: ${stats.totalTime}s\n` +
+           `Average time per row: ${stats.average}s\n` +
+           `Fastest row: ${stats.min}s\n` +
+           `Slowest row: ${stats.max}s\n`;
+  } else {
+    msg += `Timing Statistics:\nNo successful row processing. Timing data unavailable.\n`;
+  }
+
+  if (errors.length) {
+    msg += '\nErrors:\n' + errors.join('\n');
+  }
+
+  return msg;
+}
+
+/*************************************************************
+ * processSingleTranscriptRow
+ *************************************************************/
+function processSingleTranscriptRow(sheet, row, link) {
+  let fileId;
+  try {
+    fileId = extractFileIdFromLink(link);
+  } catch (err) {
+    throw new Error(`Invalid Drive link in row ${row}: ${link}`);
+  }
+
+  try {
+    console.log(`Starting OCR for row ${row}, file ${fileId}`);
+    const transcriptText = pdfToText(fileId);
+    
+    if (!transcriptText || !transcriptText.trim()) {
+      throw new Error(`No text extracted from PDF in row ${row} (blank or locked PDF)`);
+    }
+
+    // Optional chunking if too large
+    const MAX_CHARS = 12000;
+    let truncated = transcriptText;
+    if (transcriptText.length > MAX_CHARS) {
+      console.log(`Transcript for row ${row} is ${transcriptText.length} chars, truncating to ${MAX_CHARS}`);
+      truncated = transcriptText.substring(0, MAX_CHARS);
+    }
+
+    // Send to OpenAI
+    const parsedData = sendTextToOpenAi(truncated);
+
+    // Check for DD214
+    parsedData.hasDD214 = /DD214/i.test(transcriptText);
+
+    // Get spreadsheet from last initial
+    const nameParts = (parsedData.name || '').trim().split(/\s+/);
+    const lastInit = nameParts[nameParts.length - 1].charAt(0).toUpperCase();
+    const targetSheetId = SHEET_IDS[lastInit];
+    if (!targetSheetId) {
+      throw new Error(`No spreadsheet configured for last initial: ${lastInit}`);
+    }
+    const targetSS = SpreadsheetApp.openById(targetSheetId);
+    
+    // Build tab name and create/get sheet
+    const tabName = buildTabNameFromRow(sheet, row);
+    let destSheet = targetSS.getSheetByName(tabName);
+    if (!destSheet) {
+      destSheet = targetSS.insertSheet(tabName);
+    } 
+
+    // Write data and process memberships
+    writeReportToNextRow(destSheet, parsedData);
+    const catalogMap = loadCourseCatalog();
+    const membershipResults = determineSocietyMembership(parsedData, catalogMap);
+    writeSocietiesDetailToSheet(destSheet, membershipResults);
+
+    console.log(`Row ${row} => Tab "${tabName}" processed successfully.`);
+  } catch (error) {
+    console.error(`Failed to process row ${row}:`, error);
+    throw error;
+  }
+}
+
+/*************************************************************
+ * extractFileIdFromLink
+ *************************************************************/
+function extractFileIdFromLink(linkOrId) {
+  if (linkOrId.includes('open?id=')) {
+    return linkOrId.split('open?id=')[1].split('&')[0];
+  }
+  if (linkOrId.includes('/file/d/')) {
+    return linkOrId.split('/file/d/')[1].split('/')[0];
+  }
+  const match = linkOrId.match(/[-\w]{25,}/);
+  if (match) return match[0];
+  throw new Error('Invalid Drive link or file ID: ' + linkOrId);
+}
+
+/*************************************************************
+ * pdfToText using Google Drive OCR
+ *************************************************************/
+function pdfToText(fileId) {
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      console.log(`OCR attempt ${attempt}/${MAX_RETRIES} for file ${fileId}`);
+      
+      // Get file and create blob
+      const pdfFile = DriveApp.getFileById(fileId);
+      const pdfBlob = pdfFile.getBlob();
+      
+      // Set up OCR options
+      const resource = {
+        title: `OCR_${pdfFile.getName()}_${new Date().getTime()}`,
+        mimeType: MimeType.GOOGLE_DOCS,
+        ocr: true,
+        ocrLanguage: 'en',
+        useContentAsIndexableText: true
+      };
+
+      // Convert to Doc with OCR
+      console.log("Converting to Doc with OCR...");
+      const docFile = Drive.Files.copy(resource, fileId, { 
+        ocr: true,
+        ocr_language: 'en'
+      });
+
+      // Extract text
+      console.log("Extracting text...");
+      const doc = DocumentApp.openById(docFile.id);
+      const text = doc.getBody().getText();
+
+      // Cleanup
+      Drive.Files.remove(docFile.id);
+
+      if (!text || !text.trim()) {
+        throw new Error("OCR produced empty text");
+      }
+
+      console.log(`OCR successful on attempt ${attempt}`);
+      return text;
+
+    } catch (error) {
+      console.error(`OCR attempt ${attempt} failed:`, error);
+      
+      if (attempt === MAX_RETRIES) {
+        throw new Error(`OCR failed after ${MAX_RETRIES} attempts: ${error.message}`);
+      }
+
+      const backoffMs = getBackoffTime(attempt);
+      console.log(`Waiting ${backoffMs}ms before retry...`);
+      wait(backoffMs);
+    }
+  }
+}
+
+/*************************************************************
+ * sendTextToOpenAi
+ *************************************************************/
+function sendTextToOpenAi(extractedText) {
+  const approximateTokens = Math.ceil(extractedText.split(/\s+/).length * 1.33);
+  tokenBucket.waitForTokens(approximateTokens);
+  console.log(`Estimated tokens needed: ${approximateTokens}`); 
+  const endpoint = 'https://api.openai.com/v1/chat/completions';
+
+  // Replace with your actual API key
+  const apiKey = PropertiesService.getScriptProperties().getProperty('API');
+
+  const messages = [
+    {
+    role: 'system',
+    content: 
+      "You are an assistant extracting structured data from transcripts. " +
+      "Return JSON with the following fields: name, dob, major, earnedHours, gpaHours, qualityPoints, gpa, " +
+      "courses (array of objects with properties: term, code, title, grade, creditHours, qualityPoints, isOcc, institution), " +
+      "inProgressCourses (array of objects with properties: term, code, title, creditHours, isOcc), " +
+      "societies (array of strings), hasAPEnglish. " +
+      "\n\n" +
+      "Important for courses: If a course has 'OC' in the Level column, set isOcc=true and institution='ORANGE COAST COLLEGE'. " +
+      "For other courses, look for institution headers like 'ATTENDED:' or institution names in the transcript section headers. " +
+      "Make sure to include all institutions found in the transcript. " +
+      "\n\n" +
+      "For in-progress courses: These appear in a special 'COURSES IN PROGRESS' section. Only include these courses once in inProgressCourses array. " +
+      "\n\n" +
+      "Important: Process the entire transcript section by section, maintaining the order of institutions as they appear. " +
+      "Ensure all course information including grades, credit hours, and quality points are captured accurately."
+  },
+  {
+    role: 'user',
+    content: extractedText
+  }
+  ];
+  const payload = {
+    model: 'gpt-4o',  // or 'gpt-4', etc.
+    messages: messages,
+    temperature: 0
+  };
+
+  const options = {
+    method: 'post',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  const response = UrlFetchApp.fetch(endpoint, options);
+  const statusCode = response.getResponseCode();
+  const body = response.getContentText();
+
+  if (statusCode >= 400) {
+    throw new Error(`OpenAI error ${statusCode}: ${body}`);
+  }
+
+  const json = JSON.parse(body);
+  const content = json.choices?.[0]?.message?.content || '';
+  if (!content) {
+    throw new Error('No content from GPT.');
+  }
+
+  const cleanedContent = content
+    .replace(/```json/g, '')
+    .replace(/```/g, '')
+    .trim();
+
+  try {
+    return JSON.parse(cleanedContent);
+  } catch (err) {
+    throw new Error('Failed to parse GPT JSON: ' + err.message + '\nGPT said:\n' + cleanedContent);
+  }
+}
+
+/*************************************************************
+ * loadCourseCatalog
+ *************************************************************/
+function loadCourseCatalog() {
+  if (CACHED_CATALOG_MAP && CATALOG_LAST_UPDATED && 
+      (Date.now() - CATALOG_LAST_UPDATED) < CACHE_DURATION) {
+    console.log("Using cached course catalog");
+    return CACHED_CATALOG_MAP;
+  }
+
+  console.log("Loading fresh course catalog");
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const catSheet = ss.getSheetByName('Course Catalogue');
+  
+  if (!catSheet) {
+    throw new Error('No "Course Catalogue" sheet found.');
+  }
+
+  const data = catSheet.getDataRange().getValues();
+  const header = data[0];
+  const rows = data.slice(1);
+
+  const knownSocieties = [
+    'ABG', 'AGS', 'AMG', 'EEO', 'HP', 'IX', 'MAT', 'MDR', 'NTHS', 'OPS',
+    'PAM', 'PTK', 'PRS', 'PTE', 'PB', 'SALUTE', 'SCE', 'SKD'
+  ];
+
+  const colIndexBySociety = {};
+  header.forEach((colName, idx) => {
+    const society = colName?.trim().toUpperCase();
+    if (knownSocieties.includes(society)) {
+      colIndexBySociety[society] = idx;
+    }
+  });
+
+  const catalogMap = rows.reduce((acc, row) => {
+    const title = row[1]?.trim().toUpperCase();
+    if (!title) return acc;
+
+    acc[title] = Object.entries(colIndexBySociety)
+      .filter(([soc, idx]) => row[idx]?.toString().trim().toUpperCase() === 'X')
+      .map(([soc]) => soc);
+
+    return acc;
+  }, {});
+  
+  CACHED_CATALOG_MAP = catalogMap;
+  CATALOG_LAST_UPDATED = Date.now();
+  
+  console.log(`Loaded ${Object.keys(catalogMap).length} courses into catalog`);
+  return catalogMap;
+}
+
+/*************************************************************
+ * buildTabNameFromRow
+ *************************************************************/
+function buildTabNameFromRow(sheet, row) {
+  const fullName = sheet.getRange(row, 7).getValue();
+  if (!fullName) {
+    throw new Error(`No name found in column G of row ${row}.`);
+  }
+
+  const nameParts = fullName.trim().split(' ').filter(n => n);
+  const firstName = nameParts[0];
+  const lastName = nameParts[nameParts.length - 1];
+  const middleName = nameParts.slice(1, -1).join(' ').trim();
+
+  let tabName = (lastName + ', ' + firstName + (middleName ? ' ' + middleName : '')).trim();
+
+  tabName = tabName.replace(/[:\\/?\[\]]/g, '').trim();
+
+  if (tabName.length > 100) {
+    tabName = tabName.substring(0, 100);
+  }
+
+  return tabName;
+}
+
+/*************************************************************
+ * getOrCreateSheet and getSheetByNameCaseInsensitive
+ *************************************************************/
+function getOrCreateSheet(spreadsheet, name) {
+  const cleanName = name.replace(/\u200B/g, '');
+  const existing = getSheetByNameCaseInsensitive(spreadsheet, cleanName);
+  return existing || spreadsheet.insertSheet(cleanName);
+}
+function getSheetByNameCaseInsensitive(spreadsheet, name) {
+  const targetName = name.replace(/\u200B/g, '').toLowerCase();
+  const sheets = spreadsheet.getSheets();
+  
+  for (const sh of sheets) {
+    const sheetName = sh.getName().replace(/\u200B/g, '').toLowerCase();
+    if (sheetName === targetName) {
+      return sh;
+    }
+  }
+  return null;
+}
+
+/*************************************************************
+ * writeReportToNextRow
+ *************************************************************/
+function writeReportToNextRow(sheet, data) {
+  const rows = [];
+  // Header row
+  const headerRow = [
+    'Section', 'Detail', 'Value',
+    'Term', 'Course Code', 'Course Title',
+    'Grade/GPA', 'Credit Hours', 'Quality Points'
+  ];
+  rows.push(headerRow);
+
+  // Student Info Section
+  const studentInfoRows = [
+    ['Student Info', 'Name', data.name || '', '', '', '', '', '', ''],
+    ['Student Info', 'DOB', data.dob || '', '', '', '', '', '', ''],
+    ['Student Info', 'Major', data.major || '', '', '', '', '', '', '']
+  ];
+  rows.push(...studentInfoRows);
+  let ipUnits = 0;
+  let occIpUnits = 0;
+  let otherIpUnits = 0;
+  if (Array.isArray(data.inProgressCourses)) {
+    data.inProgressCourses.forEach(course => {
+      ipUnits += parseFloat(course.creditHours || 0);
+      if (course.isOcc) {
+        occIpUnits += parseFloat(course.creditHours || 0);
+      }
+      else {
+        otherIpUnits +=parseFloat(course.creditHours || 0);
+      }
+    });
+  }
+
+  // Overall Totals Section
+  const overallTotalsRows = [
+    ['Overall Totals', 'Earned Hours', data.earnedHours || '', '', '', '', '', '', ''],
+    ['Overall Totals', 'GPA Hours', data.gpaHours || '', '', '', '', '', '', ''],
+    ['Overall Totals', 'Quality Points', data.qualityPoints || '', '', '', '', '', '', ''],
+    ['Overall Totals', 'GPA', data.gpa || '', '', '', '', '', '', ''],
+    ['Overall Totals', 'In-progress Units', occIpUnits + " + " + otherIpUnits, '', '', '', '', '', '']
+  ];
+  rows.push(...overallTotalsRows);
+
+  if (Array.isArray(data.courses)) {
+    // First, separate OCC and non-OCC courses
+    const occCourses = data.courses.filter(course => course.isOcc === true);
+    const otherCourses = data.courses.filter(course => course.isOcc !== true);
+
+    // Process non-OCC courses first
+    const coursesByInstitution = {};
+    otherCourses.forEach(course => {
+      const inst = course.institution ? course.institution.trim() : "Unknown Institution";
+      if (!coursesByInstitution[inst]) {
+        coursesByInstitution[inst] = [];
+      }
+      coursesByInstitution[inst].push(course);
+    });
+
+    // Process each non-OCC institution
+    Object.entries(coursesByInstitution).forEach(([inst, courses]) => {
+      rows.push([`${inst} Transcript`, "", "", "", "", "", "", "", ""]);
+      
+      courses.forEach(course => {
+        rows.push([
+          "", "", "",
+          course.term || "",
+          course.code || "",
+          course.title || "",
+          course.grade || "",
+          course.creditHours || "",
+          course.qualityPoints || ""
+        ]);
+      });
+
+      // Calculate institution totals
+      const instTotals = courses.reduce((acc, course) => {
+        if (course.qualityPoints) {
+          acc.creditHours += parseFloat(course.creditHours || 0);
+          acc.qualityPoints += parseFloat(course.qualityPoints || 0);
+        }
+        return acc;
+      }, { creditHours: 0, qualityPoints: 0 });
+      
+      const instGPA = instTotals.creditHours > 0 ? 
+        (instTotals.qualityPoints / instTotals.creditHours).toFixed(2) : "N/A";
+      
+      rows.push([
+        `${inst} Totals`, "", "",
+        "", "", "",
+        instGPA,
+        instTotals.creditHours.toString(),
+        instTotals.qualityPoints.toString()
+      ]);
+    });
+
+    // Process OCC courses last
+    if (occCourses.length > 0) {
+      rows.push(["ORANGE COAST COLLEGE Transcript", "", "", "", "", "", "", "", ""]);
+      
+      occCourses.forEach(course => {
+        rows.push([
+          "", "", "",
+          course.term || "",
+          course.code || "",
+          course.title || "",
+          course.grade || "",
+          course.creditHours || "",
+          course.qualityPoints || ""
+        ]);
+      });
+
+      // Calculate OCC totals
+      const occTotals = occCourses.reduce((acc, course) => {
+        if (course.qualityPoints) {
+          acc.creditHours += parseFloat(course.creditHours || 0);
+          acc.qualityPoints += parseFloat(course.qualityPoints || 0);
+        }
+        return acc;
+      }, { creditHours: 0, qualityPoints: 0 });
+      
+      const occGPA = occTotals.creditHours > 0 ? 
+        (occTotals.qualityPoints / occTotals.creditHours).toFixed(2) : "N/A";
+      
+      rows.push([
+        "ORANGE COAST COLLEGE Totals", "", "",
+        "", "", "",
+        occGPA,
+        occTotals.creditHours.toString(),
+        occTotals.qualityPoints.toString()
+      ]);
+    }
+  }
+
+  // In Progress Courses (only once)
+  if (Array.isArray(data.inProgressCourses) && data.inProgressCourses.length > 0) {
+    rows.push(["Courses In Progress", "", "", "", "", "", "", "", ""]);
+    
+    // Sort in-progress courses by term
+    data.inProgressCourses
+      .sort((a, b) => (a.term || '').localeCompare(b.term || ''))
+      .forEach(course => {
+        rows.push([
+          "", "", "",
+          course.term || "",
+          course.code || "",
+          course.title || "",
+          "IP",
+          course.creditHours || "",
+          ""
+        ]);
+      });
+  }
+
+  // Societies from Transcript
+  if (Array.isArray(data.societies)) {
+    rows.push(['Societies from Transcript', '', data.societies.join(', '), '', '', '', '', '', '']);
+  }
+
+  // DD214 Information
+  rows.push(['DD214', 'Has DD214?', data.hasDD214 ? 'Yes' : 'No', '', '', '', '', '', '']);
+
+  // Write to sheet
+  try {
+    const range = sheet.getRange(1, 11, rows.length, 9);
+    range.setValues(rows);
+    sheet.getRange(1, 11, 1, 9).setFontWeight('bold');
+    sheet.setColumnWidths(11, 9, 160);
+    sheet.getRange(1, 11, rows.length, 9).setHorizontalAlignment('left').setWrap(true);
+    sheet.setFrozenRows(1);
+  } catch (error) {
+    console.error("Error writing to sheet:", error);
+    throw new Error(`Failed to write to sheet: ${error.message}`);
+  }
+}
+
+
+/*************************************************************
+ * determineSocietyMembership
+ *************************************************************/
+// Helper: Returns the filtered list of courses for a given society.
+function getQualifyingCoursesForSociety(studentCourses, society, societyConfig, catalogMap) {
+  const qualifyingCourses = [];
+  console.log(`Checking qualifying courses for ${society}. OCC-only: ${societyConfig[society].occOnly}`);
+  
+  for (const [courseTitle, courseData] of Object.entries(studentCourses)) {
+    const letterGrade = (courseData.grade || '').toUpperCase();
+    
+    // Only allow courses with letter grades A, B, C, D, or F.
+    if (!['A', 'B', 'C', 'D', 'F'].includes(letterGrade)) {
+      console.log(`  ${courseTitle}: Skipping course with non-standard grade (${letterGrade})`);
+      continue;
+    }
+    
+    // Compute quality points if they are missing or invalid.
+    let qualityPoints = courseData.qualityPoints;
+    if (qualityPoints == null || isNaN(parseFloat(qualityPoints))) {
+      if (courseData.numericGrade != null && courseData.creditHours != null) {
+        qualityPoints = courseData.numericGrade * courseData.creditHours;
+        // Optionally, you can assign it back if needed:
+        // courseData.qualityPoints = qualityPoints;
+      } else {
+        console.log(`  ${courseTitle}: Skipping course due to missing quality points and insufficient data`);
+        continue;
+      }
+    }
+    
+    // At this point, qualityPoints is a valid number.
+    // Attempt to find eligible societies using an exact lookup.
+    let eligibleSocieties = catalogMap[courseTitle];
+    
+    // If no exact match, try a fuzzy match on the course title.
+    if (!eligibleSocieties) {
+      for (const key in catalogMap) {
+        if (courseTitle.includes(key) || key.includes(courseTitle)) {
+          eligibleSocieties = catalogMap[key];
+          console.log(`  Fuzzy match: Using catalog key "${key}" for course "${courseTitle}"`);
+          break;
+        }
+      }
+    }
+    
+    if (!eligibleSocieties || !eligibleSocieties.includes(society)) {
+      console.log(`  ${courseTitle}: Not in catalog for ${society} (eligible societies: ${eligibleSocieties})`);
+      continue;
+    }
+    
+    // If the society is OCC-only, skip any course that is not flagged as OCC.
+    if (societyConfig[society].occOnly && !courseData.isOcc) {
+      console.log(`  ${courseTitle}: Skipping non-OCC course for OCC-only society`);
+      continue;
+    }
+    
+    console.log(`  ${courseTitle}: Qualified for ${society}`);
+    // Optionally, you can attach the computed qualityPoints to the courseData.
+    qualifyingCourses.push({ title: courseTitle, qualityPoints, ...courseData });
+  }
+  
+  return qualifyingCourses;
+}
+
+
+
+function determineSocietyMembership(parsedData, catalogMap) {
+  console.log("Starting Society Membership Check...");
+
+  // Society configuration – note which ones require OCC-only filtering.
+  const societyConfig = {
+    ABG: { name: 'ABG', occOnly: false },
+    AGS: { name: 'AGS', occOnly: false },
+    AMG: { name: 'AMG', occOnly: false },
+    EEO: { name: 'EEO', occOnly: false },
+    MAT: { name: 'MAT', occOnly: true },
+    MDR: { name: 'MDR', occOnly: false },
+    NTHS: { name: 'NTHS', occOnly: false },
+    OPS: { name: 'OPS', occOnly: false },
+    PAM: { name: 'PAM', occOnly: true },
+    PTK: { name: 'PTK', occOnly: false },
+    PRS: { name: 'PRS', occOnly: true },
+    PTE: { name: 'PTE', occOnly: true },
+    PB:  { name: 'PB',  occOnly: false },
+    SALUTE: { name: 'SALUTE', occOnly: false },
+    SCE: { name: 'SCE', occOnly: false },
+    SKD: { name: 'SKD', occOnly: false },
+    IX: { name: 'IX', occOnly: false }
+  };
+
+  // Use a single local helper to convert letter grades to numbers.
+  function letterGradeToPoints(letter) {
+    const g = (letter || '').toUpperCase();
+    switch (g) {
+      case 'A': return 4.0;
+      case 'B': return 3.0;
+      case 'C': return 2.0;
+      case 'D': return 1.0;
+      case 'F': return 0.0;
+      default: return null;
+    }
+  }
+
+  // Sum the credit hours for in-progress courses (only counting OCC ones).
+  function getInProgressUnitsAtOCC(parsed) {
+    let total = 0;
+    if (Array.isArray(parsed.inProgressCourses)) {
+      for (const ipc of parsed.inProgressCourses) {
+        if (ipc.isOcc) {
+          total += parseFloat(ipc.creditHours || 0);
+        }
+      }
+    }
+    return total;
+  }
+
+  // Build a map of completed courses.
+  const studentCourses = {};
+  (parsedData.courses || []).forEach(c => {
+    const title = (c.title || '').trim().toUpperCase();
+    if (!title) return;
+    studentCourses[title] = {
+      title: title,
+      grade: c.grade,
+      numericGrade: letterGradeToPoints(c.grade),
+      creditHours: parseFloat(c.creditHours || 0),
+      isOcc: c.isOcc || false
+    };
+  });
+
+  console.log("Parsed student courses:", studentCourses);
+
+  const cumGPA = parseFloat(parsedData.gpa) || 0;
+  const totalUnits = parseFloat(parsedData.earnedHours) || 0;
+  const ipUnits = getInProgressUnitsAtOCC(parsedData);
+  console.log("Cumulative GPA:", cumGPA, "Total Units:", totalUnits, "In-progress Units:", ipUnits);
+
+  const allSocieties = [
+    'ABG', 'AGS', 'AMG', 'EEO', 'IX', 'MAT', 'MDR', 'NTHS', 'OPS',
+    'PAM', 'PB', 'PTK', 'PRS', 'PTE', 'SALUTE', 'SCE', 'SKD'
+  ];
+
+  const results = {};
+
+  // For each society, always use the helper to get the filtered list.
+  for (const soc of allSocieties) {
+    console.log(`\n--- Checking society: ${soc} ---`);
+    const qualCoursesArr = getQualifyingCoursesForSociety(studentCourses, soc, societyConfig, catalogMap);
+    // Compute metrics from the filtered array using the global averageGPA:
+    const qualUnits = qualCoursesArr.reduce((sum, course) => sum + course.creditHours, 0);
+    let qualGPA = qualCoursesArr.length > 0 ? averageGPA(qualCoursesArr) : 'N/A';
+    const qualCourses = qualCoursesArr.map(course => `${course.title} (${course.grade})`).join(', ');
+
+    // Common conditions:
+    const enrolledOK = ipUnits > 0;
+    const gpaOK = cumGPA >= 3.0;
+    const unitsOK = totalUnits >= 12;
+
+    let qualifies = false;
+    let membershipLevel = '';
+    let reason = '';
+
+    // --- Society-specific criteria ---
+    if (soc === 'ABG') {
+      const abgCourseCount = qualCoursesArr.length;
+      const abgAvg = averageGPA(qualCoursesArr);
+      console.log(`  ABG Criteria: Enrolled=${enrolledOK}, GPA>=3.0=${gpaOK}, Units>=12=${unitsOK}, Courses>=2: ${abgCourseCount >= 2}, Avg>=3.0: ${abgAvg >= 3.0}`);
+      if (enrolledOK && gpaOK && unitsOK && abgCourseCount >= 2 && abgAvg >= 3.0) {
+        qualifies = true;
+        membershipLevel = 'Permanent';
+        reason = `ABG Permanent: Currently enrolled, GPA >= 3.0, 12+ units, and 2+ ABG courses with avg >= 3.0.`;
+      } else if (enrolledOK && gpaOK && unitsOK && abgCourseCount >= 1 && abgAvg >= 3.0) {
+        qualifies = true;
+        membershipLevel = 'Initial';
+        reason = `ABG Initial: Currently enrolled, GPA >= 3.0, 12+ units, and 1+ ABG course with avg >= 3.0.`;
+      } else {
+        reason = `Not qualified for ABG: Enrolled=${enrolledOK}, GPA>=3.0=${gpaOK}, Units>=12=${unitsOK}, Courses=${abgCourseCount}, Avg=${abgAvg.toFixed(2)}.`;
+      }
+    }
+    else if (soc === 'AGS') {
+      // For AGS, use the filtered list for AGS (which does not restrict by OCC-only in this case)
+      // and assume that all courses in qualCoursesArr are eligible for AGS.
+      const agsQualUnits = qualCoursesArr.reduce((sum, course) => sum + course.creditHours, 0);
+      // Here we use the global averageGPA function.
+      const agsAvg = qualCoursesArr.length > 0 ? averageGPA(qualCoursesArr) : 0;
+      
+      // Common overall conditions:
+      // - Must be currently enrolled in OCC classes.
+      // - Overall, the student must have completed at least 12 letter-graded units.
+      // - Must have a cumulative GPA of 3.0 or higher.
+      if (!enrolledOK || totalUnits < 12 || cumGPA < 3.0) {
+        qualifies = false;
+        reason = `Not qualified for AGS: Enrolled at OCC (ipUnits=${ipUnits}), Completed units (${totalUnits}), GPA (${cumGPA.toFixed(2)})`;
+      } else {
+        // Student meets minimum criteria for Initial Membership.
+        qualifies = true;
+        membershipLevel = 'Initial';
+        reason = `AGS Initial: Enrolled, completed at least 12 units, and cumulative GPA is ${cumGPA.toFixed(2)} (>=3.0).`;
+        
+        // Optionally, if additional thresholds are met, upgrade to Permanent Membership.
+        // For example, if the student has completed 60+ units and a cumulative GPA of at least 3.25.
+        if (totalUnits >= 60 && cumGPA >= 3.25) {
+          qualifies = true;
+          membershipLevel = 'Check for 2 previous semesters of uninterrupted membership';
+          reason = `AGS Permanent: Enrolled, with 60+ units and a cumulative GPA of ${cumGPA.toFixed(2)} (>=3.25).`;
+        }
+      }
+    }
+    else if (soc === 'AMG') {
+      const amgCourseCount = qualCoursesArr.length;
+      const amgAcount = qualCoursesArr.filter(c => c.grade.toUpperCase() === 'A').length;
+      const amgAorBcount = qualCoursesArr.filter(c => {
+        const g = (c.grade || '').toUpperCase();
+        return (g === 'A' || g === 'B');
+      }).length;
+      let inProgressAMGcount = 0;
+      if (Array.isArray(parsedData.inProgressCourses)) {
+        for (const ipc of parsedData.inProgressCourses) {
+          const title = (ipc.title || '').trim().toUpperCase();
+          const socArr = catalogMap[title] || [];
+          if (socArr.includes('AMG')) inProgressAMGcount++;
+        }
+      }
+      if (unitsOK && gpaOK && amgAcount >= 2) {
+        qualifies = true;
+        membershipLevel = 'Permanent';
+        reason = `AMG Permanent: 12+ units, GPA ≥ 3.0, with at least 2 A-grades in AMG courses.`;
+      } else {
+        const meetsBaseReqs = (totalUnits >= 6 && gpaOK);
+        const hasAorB = (amgAorBcount > 0);
+        const hasInProgress = (inProgressAMGcount > 0);
+        if (meetsBaseReqs && (hasAorB || hasInProgress)) {
+          qualifies = true;
+          membershipLevel = 'Associate Membership';
+          reason = `AMG Associate: 6+ units, GPA ≥ 3.0, and either an A/B in completed AMG course(s) or an in-progress AMG course.`;
+        } else {
+          reason = `Not qualified for AMG: GPA≥3.0=${gpaOK}, 6+ units met=${totalUnits >= 6}, A/B count=${amgAorBcount}, in-progress count=${inProgressAMGcount}.`;
+        }
+      }
+    }
+    else if (soc === 'EEO') {
+      // Check the general criteria first
+      if (!enrolledOK || !unitsOK || !gpaOK) {
+        qualifies = false;
+        reason = `Not qualified for EEO: General criteria not met (Enrolled>=6: ${enrolledOK}, Units>=12: ${unitsOK}, GPA>=3.0: ${gpaOK}).`;
+      } else {
+        // Get the courses that qualify for EEO based on the catalogue mapping.
+        const eeoCourses = getQualifyingCoursesForSociety(studentCourses, "EEO", societyConfig, catalogMap);
+        
+        // Compute the average GPA among these EEO-qualified courses.
+        const avgEEOGPA = averageGPA(eeoCourses);
+        
+        if (avgEEOGPA < 3.0) {
+          qualifies = false;
+          reason = `Not qualified for EEO: Average GPA among EEO qualifying courses (${avgEEOGPA.toFixed(2)}) is below 3.0.`;
+        } else {
+          // Count how many of these courses are "marine" courses (using title-based detection)
+          const marineCourses = eeoCourses.filter(c => /marine/i.test(c.title));
+          
+          // For Permanent Membership, require at least two marine science courses.
+          if (marineCourses.length >= 2) {
+            qualifies = true;
+            membershipLevel = 'Permanent';
+            reason = `EEO Permanent: General criteria met, and completed ${marineCourses.length} marine course(s) with an average qualifying GPA of ${avgEEOGPA.toFixed(2)}.`;
+          } 
+          // For Initial Membership, require at least one qualifying course.
+          else if (eeoCourses.length >= 1) {
+            qualifies = true;
+            membershipLevel = 'Initial';
+            reason = `EEO Initial: General criteria met, and completed ${eeoCourses.length} qualifying course(s) with an average qualifying GPA of ${avgEEOGPA.toFixed(2)}.`;
+          } else {
+            qualifies = false;
+            reason = `Not qualified for EEO: No courses marked for EEO in the catalogue.`;
+          }
+        }
+      }
+    }
+
+    else if (soc === 'IX') {
+      const ixBcount = qualCoursesArr.filter(c => c.numericGrade >= 3.0).length;
+      if (enrolledOK && unitsOK && ixBcount >= 1) {
+        qualifies = true;
+        membershipLevel = 'Permanent';
+        reason = `IX Permanent: Enrolled >=6 units, 12+ units, and at least 1 IX course with a grade of B or higher.`;
+      } else {
+        reason = `Not qualified for IX: Enrolled>=6=${enrolledOK}, Units>=12=${unitsOK}, IX courses (B or higher) count=${ixBcount}.`;
+      }
+    }
+    else if (soc === 'MAT') {
+      // For MAT, occOnly applies; our helper already filtered accordingly.
+      const matCourseCount = qualCoursesArr.length;
+      const matAvg = matCourseCount > 0 ? averageGPA(qualCoursesArr) : 0;
+      if (enrolledOK && gpaOK && unitsOK && matCourseCount >= 1 && matAvg >= 3.0) {
+        qualifies = true;
+        membershipLevel = 'Permanent';
+        reason = `MAT Permanent: Enrolled at OCC, GPA >= 3.0, 12+ units, and at least 1 MAT course with avg >= 3.0.`;
+      } else {
+        reason = `Not qualified for MAT: Enrolled=${enrolledOK}, GPA>=3.0=${gpaOK}, Units>=12=${unitsOK}, MAT courses=${matCourseCount}, MAT Avg=${matAvg.toFixed(2)}.`;
+      }
+      // Update the displayed metrics with the filtered values.
+      // (They are already computed in qualUnits, qualGPA, qualCourses from our helper.)
+    }
+    else if (soc === 'MDR') {
+      const mdrQualUnits = qualCoursesArr.reduce((sum, course) => sum + course.creditHours, 0);
+      const mdrAvg = qualCoursesArr.length > 0 ? averageGPA(qualCoursesArr) : 0;
+      const enrolledOK_MDR = ipUnits >= 6;
+      const permanentOverallOK = (totalUnits >= 12 && cumGPA >= 3.50);
+      const permanentCoursesOK = (mdrQualUnits >= 12 && mdrAvg >= 3.0);
+      const initialOverallOK = (totalUnits >= 12 && cumGPA >= 3.25);
+      const initialCoursesOK = (qualCoursesArr.length >= 1 && mdrAvg >= 3.0);
+      const provisionalOverallOK = ((totalUnits >= 12 && cumGPA >= 3.0) ||
+                                    (totalUnits >= 6 && cumGPA >= 3.50));
+      const provisionalCoursesOK = (qualCoursesArr.length >= 1);
+      if (enrolledOK_MDR && permanentOverallOK && permanentCoursesOK) {
+        qualifies = true;
+        membershipLevel = 'Permanent';
+        reason = `MDR Permanent: Enrolled (≥6 units), ${totalUnits} total units (cum GPA ${cumGPA.toFixed(2)} ≥3.50), and ${mdrQualUnits} MDR units (avg ${mdrAvg.toFixed(2)} ≥3.0).`;
+      } else if (enrolledOK_MDR && initialOverallOK && initialCoursesOK) {
+        qualifies = true;
+        membershipLevel = 'Initial';
+        reason = `MDR Initial: Enrolled (≥6 units), ${totalUnits} total units (cum GPA ${cumGPA.toFixed(2)} ≥3.25), and at least one MDR course (avg ${mdrAvg.toFixed(2)} ≥3.0).`;
+      } else if (enrolledOK_MDR && provisionalOverallOK && provisionalCoursesOK) {
+        qualifies = true;
+        membershipLevel = 'Provisional';
+        reason = `MDR Provisional: Enrolled (≥6 units), ${totalUnits} total units (cum GPA ${cumGPA.toFixed(2)}), and at least one MDR course.`;
+      } else {
+        reason = `Not qualified for MDR: Enrolled=${enrolledOK_MDR}, Total Units=${totalUnits}, Cum GPA=${cumGPA.toFixed(2)}, Qualifying MDR Units=${mdrQualUnits}, Qualifying MDR Avg=${mdrAvg.toFixed(2)}.`;
+      }
+    }
+    else if (soc === 'NTHS') {
+      const nthsQualCourses = qualCoursesArr.filter(c => c.numericGrade !== null && c.numericGrade >= 3.0 && c.isOcc);
+      const nthsAvg = nthsQualCourses.length > 0 ? averageGPA(nthsQualCourses) : 0;
+      if (enrolledOK && unitsOK && gpaOK && nthsQualCourses.length >= 3 && nthsAvg >= 3.0) {
+        qualifies = true;
+        membershipLevel = 'Permanent';
+        reason = `NTHS Permanent: Enrolled at OCC, 12+ units, GPA ≥3.0, and ${nthsQualCourses.length} qualifying OCC CTE courses (avg ${nthsAvg.toFixed(2)}).`;
+      } else if (enrolledOK) {
+        qualifies = true;
+        membershipLevel = 'Provisional';
+        reason = `NTHS Provisional: Enrolled at OCC. (High school transcript needed for additional verification.)`;
+      } else {
+        reason = `Not qualified for NTHS: Enrolled=${enrolledOK}, Units>=12=${unitsOK}, GPA>=3.0=${gpaOK}, Qualifying OCC CTE courses=${nthsQualCourses.length}, Qualifying GPA=${nthsAvg.toFixed(2)}.`;
+      }
+    }
+    else if (soc === 'OPS') {
+      const opsCourseCount = qualCoursesArr.length;
+      const opsAvg = qualCoursesArr.length > 0 ? averageGPA(qualCoursesArr) : 0;
+      if (enrolledOK && unitsOK && gpaOK && opsCourseCount >= 2 && opsAvg >= 3.25) {
+        qualifies = true;
+        membershipLevel = 'Permanent';
+        reason = `OPS Permanent: Enrolled, 12+ units, GPA ≥3.0, and 2+ OPS courses with avg ≥3.25.`;
+      } else if (enrolledOK && unitsOK && gpaOK && opsCourseCount >= 1 && opsAvg >= 3.0) {
+        qualifies = true;
+        membershipLevel = 'Initial';
+        reason = `OPS Initial: Enrolled, 12+ units, GPA ≥3.0, and at least 1 OPS course with avg ≥3.0.`;
+      } else {
+        reason = `Not qualified for OPS: Enrolled=${enrolledOK}, GPA>=3.0=${gpaOK}, Units>=12=${unitsOK}, OPS courses=${opsCourseCount}, OPS Avg=${opsAvg.toFixed(2)}.`;
+      }
+    }
+    else if (soc === 'PAM') {
+      const pamQualCourses = getQualifyingCoursesForSociety(studentCourses, soc, societyConfig, catalogMap);
+      const pamCourseCount = pamQualCourses.length;
+      const pamAvg = pamQualCourses.length > 0 ? averageGPA(pamQualCourses) : 0;
+      if (enrolledOK && unitsOK && gpaOK && pamCourseCount >= 2 && pamAvg >= 3.0) {
+        qualifies = true;
+        membershipLevel = 'Permanent';
+        reason = `PAM Permanent: Enrolled, 12+ units, GPA ≥3.0, and 2+ PAM courses with avg ≥3.0.`;
+      } else {
+        reason = `Not qualified for PAM: Enrolled=${enrolledOK}, GPA>=3.0=${gpaOK}, Units>=12=${unitsOK}, PAM courses=${pamCourseCount}, PAM Avg=${pamAvg.toFixed(2)}.`;
+      }
+    }
+    else if (soc === 'PB') {
+      if (enrolledOK && cumGPA >= 3.25 && unitsOK && qualCoursesArr.some(c => (c.numericGrade ?? 0) >= 3.0)) {
+        qualifies = true;
+        membershipLevel = 'Permanent';
+        reason = `PB Permanent: Enrolled, cumGPA>=3.25, 12+ units, and at least one qualifying PB course (grade >= B).`;
+      } else {
+        reason = `Not qualified for PB: Enrolled=${enrolledOK}, cumGPA>=3.25=${cumGPA >= 3.25}, Units>=12=${unitsOK}, Qualifying PB course present=${qualCoursesArr.some(c => (c.numericGrade ?? 0) >= 3.0)}.`;
+      }
+    }
+    else if (soc === 'PTK') {
+      const ptkQualCourses = getQualifyingCoursesForSociety(studentCourses, soc, societyConfig, catalogMap);
+      const qualifiedUnits = ptkQualCourses.reduce((sum, course) => sum + course.creditHours, 0);
+      const qualifiedGPA = ptkQualCourses.length > 0 ? averageGPA(ptkQualCourses) : 0;
+      if (!enrolledOK) {
+        reason = `Not qualified for PTK: Not currently enrolled at OCC (ipUnits=${ipUnits}).`;
+      } else if (enrolledOK && qualifiedUnits >= 12 && qualifiedGPA >= 3.50) {
+        qualifies = true;
+        membershipLevel = 'Permanent';
+        reason = `PTK Permanent: Enrolled at OCC, ${qualifiedUnits} qualifying units with avg GPA ${qualifiedGPA.toFixed(2)} (>=3.50).`;
+      } else if (enrolledOK && ((qualifiedUnits >= 6 && qualifiedUnits < 12 && qualifiedGPA >= 3.50) ||
+                                (qualifiedUnits >= 12 && qualifiedGPA >= 3.00 && qualifiedGPA < 3.50))) {
+        qualifies = true;
+        membershipLevel = 'Provisional';
+        reason = `PTK Provisional: Enrolled at OCC, ${qualifiedUnits} qualifying units with avg GPA ${qualifiedGPA.toFixed(2)}.` +
+                 (qualifiedUnits < 12 ? ' Meets 6-11 units with 3.50+ GPA.' : ' Meets 12+ units with 3.00-3.49 GPA.');
+      } else {
+        reason = `Not qualified for PTK: Enrolled=${enrolledOK}, Qualifying Units=${qualifiedUnits}, Qualifying GPA=${qualifiedGPA.toFixed(2)}. High school transcript may be needed.`;
+      }
+    }
+    else if (soc === 'PRS') {
+      const prsQualCourses = getQualifyingCoursesForSociety(studentCourses, soc, societyConfig, catalogMap);
+      const prsCourseCount = prsQualCourses.length;
+      const prsAvg = prsQualCourses.length > 0 ? averageGPA(prsQualCourses) : 0;
+      if (enrolledOK && unitsOK && gpaOK && prsCourseCount >= 2 && prsAvg >= 3.0) {
+        qualifies = true;
+        membershipLevel = 'Permanent';
+        reason = `PRS Permanent: Enrolled, 12+ units, GPA ≥3.0, and 2+ PRS courses with avg ≥3.0.`;
+      } else if (enrolledOK && unitsOK && gpaOK && prsCourseCount >= 1 && prsAvg >= 3.0) {
+        qualifies = true;
+        membershipLevel = 'Initial';
+        reason = `PRS Initial: Enrolled, 12+ units, GPA ≥3.0, and at least 1 PRS course with avg ≥3.0.`;
+      } else {
+        reason = `Not qualified for PRS: Enrolled=${enrolledOK}, GPA>=3.0=${gpaOK}, Units>=12=${unitsOK}, Courses=${prsCourseCount}, Avg=${prsAvg.toFixed(2)}.`;
+      }
+    }
+    else if (soc === 'PTE') {
+      const pteQualCourses = getQualifyingCoursesForSociety(studentCourses, soc, societyConfig, catalogMap);
+      const pteCourseCount = pteQualCourses.length;
+      const pteAvg = pteQualCourses.length > 0 ? averageGPA(pteQualCourses) : 0;
+      if (enrolledOK && unitsOK && gpaOK && pteCourseCount >= 1 && pteAvg >= 3.5) {
+        qualifies = true;
+        membershipLevel = 'Permanent';
+        reason = `PTE Permanent: Enrolled, 12+ units, GPA ≥3.0, and at least 1 PTE course with avg ≥3.5.`;
+      } else {
+        reason = `Not qualified for PTE: Enrolled=${enrolledOK}, GPA>=3.0=${gpaOK}, Units>=12=${unitsOK}, Courses=${pteCourseCount}, Avg=${pteAvg.toFixed(2)}.`;
+      }
+    }
+    else if (soc === 'SALUTE') {
+      if (!parsedData.hasDD214) {
+        qualifies = false;
+        membershipLevel = '';
+        reason = `Not qualified for SALUTE: Missing DD214 form.`;
+        qualGPA = 'N/A';
+      } else if (enrolledOK && gpaOK && unitsOK) {
+        qualifies = true;
+        membershipLevel = 'Permanent';
+        let tier = '';
+        if (cumGPA >= 3.76) tier = 'ALPHA';
+        else if (cumGPA >= 3.51) tier = 'BRAVO';
+        else if (cumGPA >= 3.26) tier = 'CHARLIE';
+        else tier = 'DELTA';
+        reason = `SALUTE Permanent: Enrolled, GPA ≥3.0, 12+ units. Tier ${tier}.`;
+      } else {
+        qualifies = false;
+        membershipLevel = '';
+        reason = `Not qualified for SALUTE: Must have DD214, be enrolled, GPA ≥3.0, 12+ units.`;
+        qualGPA = 'N/A';
+      }
+    }
+    else if (soc === 'SCE') {
+      const sceQualCourses = getQualifyingCoursesForSociety(studentCourses, soc, societyConfig, catalogMap);
+      const sceCourseCount = sceQualCourses.length;
+      const sceAvg = sceQualCourses.length > 0 ? averageGPA(sceQualCourses) : 0;
+      if (enrolledOK && unitsOK && gpaOK && sceCourseCount >= 3 && sceAvg >= 3.25) {
+        qualifies = true;
+        membershipLevel = 'Permanent';
+        reason = `SCE Permanent: Enrolled, GPA ≥3.0, 12+ units, and 3+ SCE courses with avg ≥3.25.`;
+      } else if (enrolledOK && unitsOK && gpaOK && sceCourseCount >= 1 && sceAvg >= 3.0) {
+        qualifies = true;
+        membershipLevel = 'Initial';
+        reason = `SCE Initial: Enrolled, GPA ≥3.0, 12+ units, and at least 1 SCE course with avg between 3.0 and 3.24.`;
+      } else {
+        reason = `Not qualified for SCE: Enrolled=${enrolledOK}, GPA>=3.0=${gpaOK}, Units>=12=${unitsOK}, Courses=${sceCourseCount}, Avg=${sceAvg.toFixed(2)}.`;
+      }
+    }
+    else if (soc === 'SKD') {
+      // Filter SKD courses to include only those with a valid numeric grade
+      const skdQualCoursesRaw = getQualifyingCoursesForSociety(studentCourses, soc, societyConfig, catalogMap);
+      const skdQualCourses = skdQualCoursesRaw.filter(course => course.numericGrade !== null);
+      const skdCourseCount = skdQualCourses.length;
+      const skdAvg = skdCourseCount > 0 ? averageGPA(skdQualCourses) : 0;
+      
+      // Check for a course with "Freshman Composition" in its title
+      const hasFreshmanComposition = skdQualCourses.some(course => /Freshman Composition/i.test(course.title || ''));
+      
+      // Check if AP English is available (from parsedData)
+      const hasAPEnglish = parsedData.hasAPEnglish || false;
+      
+      // Calculate the effective course count by adding an extra credit course if AP English qualifies.
+      const effectiveCourseCount = skdCourseCount + ((hasAPEnglish && !hasFreshmanComposition) ? 1 : 0);
+      
+      // Require a minimum average GPA in SKD courses (e.g., >= 3.0) in addition to enrollment, overall GPA, and unit conditions.
+      if (enrolledOK && gpaOK && unitsOK && effectiveCourseCount >= 2 && skdAvg >= 3.0) {
+        qualifies = true;
+        membershipLevel = 'Permanent';
+        reason = `SKD Permanent: Enrolled>=6, GPA>=3.0, 12+ units, ${skdCourseCount} SKD courses (avg ${skdAvg.toFixed(2)})${(hasAPEnglish && !hasFreshmanComposition) ? ' + AP English' : ''} (${effectiveCourseCount} total).`;
+      } else if (enrolledOK && gpaOK && unitsOK && effectiveCourseCount >= 1 && skdAvg >= 3.0) {
+        qualifies = true;
+        membershipLevel = 'Initial';
+        reason = `SKD Initial: Enrolled>=6, GPA>=3.0, 12+ units, ${skdCourseCount} SKD courses (avg ${skdAvg.toFixed(2)})${(hasAPEnglish && !hasFreshmanComposition) ? ' + AP English' : ''} (${effectiveCourseCount} total).`;
+      } else {
+        reason = `Not qualified for SKD: Enrolled>=6=${enrolledOK}, GPA>=3.0=${gpaOK}, Units>=12=${unitsOK}, Courses=${skdCourseCount} (avg ${skdAvg.toFixed(2)})${(hasAPEnglish && !hasFreshmanComposition) ? ' + AP English' : ''} (${effectiveCourseCount} total).`;
+      }
+    }
+
+    // Build the final result for this society using the (recomputed) metrics.
+    results[soc] = {
+      qualifies,
+      membershipLevel,
+      reason,
+      qualUnits: qualifies ? qualUnits : "",
+      qualGPA: qualifies ? (typeof qualGPA === 'number' ? qualGPA.toFixed(2) : qualGPA) : "",
+      hpOnlyEnlg: parsedData.hasAPEnglish ? "Yes" : "No",
+      qualCourses: qualifies ? qualCourses : ""
+    };
+  }
+
+  // Process societies already listed on transcript
+  const nameMap = {
+    'ALPHA BETA GAMMA': 'ABG',
+    'ALPHA GAMMA SIGMA': 'AGS',
+    'ALPHA MU GAMMA': 'AMG',
+    'ETA ETA OMICRON': 'EEO',
+    'IOTA XI': 'IX',
+    'MU ALPHA THETA': 'MAT',
+    'MU DELTA RHO': 'MDR',
+    'NATIONAL TECHNICAL HONOR SOCIETY': 'NTHS',
+    'OMEGA PSI SIGMA': 'OPS',
+    'PHI ALPHA MU': 'PAM',
+    'PHI THETA KAPPA': 'PTK',
+    'PI RHO SIGMA': 'PRS',
+    'PSI BETA': 'PB',
+    'PI TAU EPSILON': 'PTE',
+    'SALUTE': 'SALUTE',
+    'SIGMA CHI ETA': 'SCE',
+    'SIGMA KAPPA DELTA': 'SKD'
+  };
+
+  const societiesFoundShort = (parsedData.societies || []).map(orig => {
+    const cleaned = orig.trim().toUpperCase();
+    return nameMap[cleaned] || cleaned;
+  });
+
+  for (const socKey of Object.keys(results)) {
+    if (societiesFoundShort.includes(socKey)) {
+      results[socKey].membershipLevel = 'MEMBER';
+      results[socKey].qualifies = true;
+      results[socKey].reason = `Already listed on transcript as ${socKey} member.`;
+    }
+  }
+
+  console.log("\nFinished Society Membership Check. Final Results:", results);
+  return results;
+}
+
+
+/*************************************************************
+ * averageGPA helper
+ *************************************************************/
+function averageGPA(courseArr) {
+  if (!courseArr || courseArr.length === 0) return 0;
+  
+  let totalQualityPoints = 0;
+  let totalCreditHours = 0;
+  
+  courseArr.forEach(course => {
+    const creditHours = parseFloat(course.creditHours) || 0;
+    
+    // If a course doesn't have a valid numeric grade, skip it.
+    if (course.numericGrade === null || creditHours <= 0) return;
+    
+    // Use the provided qualityPoints if they exist and are positive,
+    // otherwise calculate them.
+    let qualityPoints = (course.qualityPoints && parseFloat(course.qualityPoints) > 0)
+      ? parseFloat(course.qualityPoints)
+      : (course.numericGrade * creditHours);
+    
+    // Optionally, you might want to skip courses with a zero calculated qualityPoints.
+    if (qualityPoints > 0) {
+      totalQualityPoints += qualityPoints;
+      totalCreditHours += creditHours;
+    }
+  });
+  return totalCreditHours > 0 ? totalQualityPoints / totalCreditHours : 0;
+}
+
+
+/*************************************************************
+ * writeSocietiesDetailToSheet
+ * (Modified to use new format with 7 columns.)
+ *************************************************************/
+function writeSocietiesDetailToSheet(sheet, membershipResults) {
+  // Define the forced order of societies
+  const forcedOrder = ["ABG", "AGS", "AMG", "EEO", "MAT", "MDR", "NTHS", "OPS", "PAM", "PTK", "PRS", "PTE", "PB", "SALUTE", "SCE", "SKD", "IX"];
+
+  // Build the data array:
+  // Row 1: Title row ("Detailed Society Memberships")
+  // Row 2: Header row
+  // Row 3: "HONORS PROGRAM" (for now, with empty remaining cells)
+  // Rows 4+: One row per society in the forced order.
+  const data = [];
+  data.push(["Detailed Society Memberships", "", "", "", "", "", ""]);
+  data.push(["Society", "QUAL UNITS", "QUAL GPA", "QUAL LEVEL", "HP ONLY - ENGL", "Qualifying Courses", "Reason"]);
+  data.push(["HONORS PROGRAM", "", "", "", "", "", ""]);
+
+  forcedOrder.forEach(soc => {
+    // Display "SALUTE" as "SAL"
+    const displaySoc = (soc === "SALUTE") ? "SAL" : soc;
+    if (membershipResults[soc]) {
+      const { qualUnits, qualGPA, membershipLevel, qualCourses, reason } = membershipResults[soc];
+      // For now, leave the "HP ONLY - ENGL" column empty
+      data.push([displaySoc, qualUnits, qualGPA, membershipLevel, "", qualCourses, reason]);
+    } else {
+      data.push([displaySoc, "", "", "", "", "", ""]);
+    }
+  });
+
+  const startRow = sheet.getLastRow() + 2;
+  const range = sheet.getRange(startRow, 1, data.length, 7);
+  range.setValues(data);
+
+  // Bold the title row and header row
+  sheet.getRange(startRow, 1, 1, 7).setFontWeight("bold");
+  sheet.getRange(startRow + 1, 1, 1, 7).setFontWeight("bold");
+}
+/*************************************************************
+ * parseRowsInput
+ *************************************************************/
+function parseRowsInput(input) {
+  const rows = [];
+  const parts = input.split(',');
+  parts.forEach(part => {
+    if (part.includes('-')) {
+      const [start, end] = part.split('-').map(Number);
+      if (start && end && start <= end) {
+        for (let i = start; i <= end; i++) {
+          rows.push(i);
+        }
+      }
+    } else {
+      const row = Number(part);
+      if (row) {
+        rows.push(row);
+      }
+    }
+  });
+  const uniqueRows = [...new Set(rows)].filter(row => !isNaN(row) && row >= 2).sort((a, b) => a - b);
+  return uniqueRows;
+}
