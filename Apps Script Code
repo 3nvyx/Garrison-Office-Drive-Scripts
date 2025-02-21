@@ -35,7 +35,8 @@
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Student Processing')
-    .addItem('Process Selected Rows', 'showPromptForRows')
+    .addItem('1. Process Selected Rows', 'showPromptForRows')
+    .addItem('2. Process Transcript Report', 'showRowsPrompt')
     .addToUi();
 }
 
@@ -110,9 +111,9 @@ function processStudentDataFromSheet(sheet, row) {
   // (timestampCol is provided but not necessarily used here)
   const timestampCol = 1;          // Column A
   const emailCol = 2;              // Column B
-  const fullNameCol = 3;           // Column C
-  const studentIdCol = 4;          // Column D
-  const programResponseCol = 15;   // Column O
+  const fullNameCol = 7;           // Column H
+  const studentIdCol = 8;          // Column I
+  const programResponseCol = 22;   // Column U
 
   const rowData = sheet.getRange(row, 1, 1, sheet.getLastColumn()).getValues()[0];
   
@@ -202,7 +203,7 @@ function processStudentData(fullName, studentId, email, programResponse) {
     if (existingSheet) {
       Logger.log('Existing sheet found with name: "' + existingSheet.getName() + '"');
       // Clear contents instead of deleting
-      existingSheet.clearContents();
+      // existingSheet.clearContents();
       var newSheet = existingSheet;
     } else {
       // Create a new sheet
@@ -288,9 +289,9 @@ function addBoilerplate(sheet, fullName, studentId, email, programResponse) {
       ['ID NO.', '', studentId],
       ['EMAIL', '', email],
       ['EXISTING MBRSHPS', '', ''],
-      ['CURRENT ENROLL', '', ''],
-      ['OCC UNITS COMPLETE', '', ''],
-      ['OCC POINTS', '', ''],
+      ['CURRENT ENROLL', '', '=(M9)'],
+      ['OCC UNITS COMPLETE', '', '=(M6)'],
+      ['OCC POINTS', '', '=(M7)'],
       ['OCC GPA', '', '=IF(C6<>0,C7/C6,"")'],
       ['OTHER UNITS COMPLETE', '', ''],
       ['OTHER POINTS', '', ''],
@@ -371,6 +372,7 @@ function addBoilerplate(sheet, fullName, studentId, email, programResponse) {
       ['7', 'NOT A VET'],
       ['8', '']
     ];
+    sheet.setColumnWidth(10, 605);
     sheet.getRange(21, 9, dataNENQCodes.length, 2).setValues(dataNENQCodes);
     sheet.getRange(21, 9, dataNENQCodes.length, 2).setFontWeight('bold');
     // Right-align the codes in column I
@@ -469,48 +471,32 @@ function getMembershipMessage(programResponse) {
  * Requires the Google Sheets API to be enabled in the Apps Script project.
  */
 function sortSheetsAlphabetically(spreadsheet) {
-  Logger.log('Sorting sheets alphabetically in spreadsheet: ' + spreadsheet.getId());
-
-  var spreadsheetId = spreadsheet.getId();
-  var sheets = spreadsheet.getSheets();
-
+  const sheets = spreadsheet.getSheets();
+  
   // Get sheet properties
-  var sheetProperties = sheets.map(function(sheet) {
-    return {
-      sheetId: sheet.getSheetId(),
-      title: sheet.getName()
-    };
+  const sheetProperties = sheets.map(sheet => ({
+    sheetId: sheet.getSheetId(),
+    title: sheet.getName()
+  }));
+
+  // Sort sheets ignoring the leading `*` in the name
+  sheetProperties.sort((a, b) => {
+    const titleA = a.title.replace(/^\* /, '');
+    const titleB = b.title.replace(/^\* /, '');
+    return titleA.localeCompare(titleB);
   });
 
-  Logger.log('Current sheet properties: ' + JSON.stringify(sheetProperties));
+  // Update sheet indices using batch requests
+  const requests = sheetProperties.map((sheetProp, index) => ({
+    updateSheetProperties: {
+      properties: {
+        sheetId: sheetProp.sheetId,
+        index: index
+      },
+      fields: 'index'
+    }
+  }));
 
-  // Sort by title
-  sheetProperties.sort(function(a, b) {
-    return a.title.localeCompare(b.title);
-  });
-
-  Logger.log('Sorted sheet properties: ' + JSON.stringify(sheetProperties));
-
-  // Prepare requests for batchUpdate
-  var requests = sheetProperties.map(function(sheetProp, index) {
-    return {
-      updateSheetProperties: {
-        properties: {
-          sheetId: sheetProp.sheetId,
-          index: index
-        },
-        fields: 'index'
-      }
-    };
-  });
-
-  // Execute Sheets API batchUpdate
-  Sheets.Spreadsheets.batchUpdate(
-    {
-      requests: requests
-    },
-    spreadsheetId
-  );
-
-  Logger.log('Sheets sorted successfully using Sheets API.');
+  const spreadsheetId = spreadsheet.getId();
+  Sheets.Spreadsheets.batchUpdate({ requests }, spreadsheetId);
 }
