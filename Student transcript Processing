@@ -344,7 +344,6 @@ function sendTextToOpenAi(extractedText) {
   console.log(`Estimated tokens needed: ${approximateTokens}`); 
   const endpoint = 'https://api.openai.com/v1/chat/completions';
 
-  // Replace with your actual API key
   const apiKey = PropertiesService.getScriptProperties().getProperty('API');
 
   const messages = [
