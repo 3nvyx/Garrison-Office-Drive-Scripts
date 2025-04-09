@@ -221,7 +221,7 @@ function processSingleTranscriptRow(sheet, row, link) {
     }
 
     // Optional chunking if too large
-    const MAX_CHARS = 12000;
+    const MAX_CHARS = 15000;
     let truncated = transcriptText;
     if (transcriptText.length > MAX_CHARS) {
       console.log(`Transcript for row ${row} is ${transcriptText.length} chars, truncating to ${MAX_CHARS}`);
@@ -693,38 +693,35 @@ function writeReportToNextRow(sheet, data) {
 /*************************************************************
  * determineSocietyMembership
  *************************************************************/
-// Helper: Returns the filtered list of courses for a given society.
 function getQualifyingCoursesForSociety(studentCourses, society, societyConfig, catalogMap) {
   const qualifyingCourses = [];
   console.log(`Checking qualifying courses for ${society}. OCC-only: ${societyConfig[society].occOnly}`);
   
-  for (const [courseTitle, courseData] of Object.entries(studentCourses)) {
+  studentCourses.forEach(courseData => {
+    const courseTitle = courseData.title;
     const letterGrade = (courseData.grade || '').toUpperCase();
     
-    // Only allow courses with letter grades A, B, C, D, or F.
-    if (!['A', 'B', 'C', 'D', 'F'].includes(letterGrade)) {
-      console.log(`  ${courseTitle}: Skipping course with non-standard grade (${letterGrade})`);
-      continue;
+    // Only allow courses with standard letter grades
+    const validLetterGrades = ['A', 'B', 'C', 'D', 'F'];
+    if (!validLetterGrades.includes(letterGrade)) {
+      console.log(`  Skipping ${courseTitle}: Non-standard grade: ${letterGrade}`);
+      return;
     }
     
-    // Compute quality points if they are missing or invalid.
-    let qualityPoints = courseData.qualityPoints;
-    if (qualityPoints == null || isNaN(parseFloat(qualityPoints))) {
-      if (courseData.numericGrade != null && courseData.creditHours != null) {
-        qualityPoints = courseData.numericGrade * courseData.creditHours;
-        // Optionally, you can assign it back if needed:
-        // courseData.qualityPoints = qualityPoints;
-      } else {
-        console.log(`  ${courseTitle}: Skipping course due to missing quality points and insufficient data`);
-        continue;
-      }
+    // Skip course if quality points are null or undefined
+    if (courseData.qualityPoints === null || courseData.qualityPoints === undefined || courseData.qualityPoints <= 0) {
+      console.log(`  Skipping ${courseTitle}: Missing quality points`);
+      return;
     }
     
-    // At this point, qualityPoints is a valid number.
-    // Attempt to find eligible societies using an exact lookup.
+    // For societies that require OCC-only, skip courses that are not marked as OCC
+    if (societyConfig[society].occOnly && !courseData.isOcc) {
+      console.log(`  Skipping ${courseTitle}: Not OCC course, but society requires OCC-only`);
+      return;
+    }
+    
+    // Determine eligible societies via course catalog mapping
     let eligibleSocieties = catalogMap[courseTitle];
-    
-    // If no exact match, try a fuzzy match on the course title.
     if (!eligibleSocieties) {
       for (const key in catalogMap) {
         if (courseTitle.includes(key) || key.includes(courseTitle)) {
@@ -734,31 +731,20 @@ function getQualifyingCoursesForSociety(studentCourses, society, societyConfig, 
         }
       }
     }
-    
     if (!eligibleSocieties || !eligibleSocieties.includes(society)) {
-      console.log(`  ${courseTitle}: Not in catalog for ${society} (eligible societies: ${eligibleSocieties})`);
-      continue;
-    }
-    
-    // If the society is OCC-only, skip any course that is not flagged as OCC.
-    if (societyConfig[society].occOnly && !courseData.isOcc) {
-      console.log(`  ${courseTitle}: Skipping non-OCC course for OCC-only society`);
-      continue;
+      console.log(`  Skipping ${courseTitle}: Not eligible for society ${society}`);
+      return;
     }
     
     console.log(`  ${courseTitle}: Qualified for ${society}`);
-    // Optionally, you can attach the computed qualityPoints to the courseData.
-    qualifyingCourses.push({ title: courseTitle, qualityPoints, ...courseData });
-  }
+    qualifyingCourses.push({ title: courseTitle, ...courseData });
+  });
   
   return qualifyingCourses;
 }
 
-
-
 function determineSocietyMembership(parsedData, catalogMap) {
   console.log("Starting Society Membership Check...");
-
   // Society configuration – note which ones require OCC-only filtering.
   const societyConfig = {
     ABG: { name: 'ABG', occOnly: false },
@@ -807,25 +793,48 @@ function determineSocietyMembership(parsedData, catalogMap) {
   }
 
   // Build a map of completed courses.
-  const studentCourses = {};
+    const studentCourses = [];
   (parsedData.courses || []).forEach(c => {
     const title = (c.title || '').trim().toUpperCase();
     if (!title) return;
-    studentCourses[title] = {
+    
+    // Normalize isOcc to a boolean
+    let occValue = c.isOcc;
+    if (typeof occValue === 'string') {
+      const lower = occValue.toLowerCase().trim();
+      occValue = (lower === 'true' || lower === 'yes');
+    } else {
+      occValue = Boolean(occValue);
+    }
+    
+    studentCourses.push({
       title: title,
       grade: c.grade,
       numericGrade: letterGradeToPoints(c.grade),
       creditHours: parseFloat(c.creditHours || 0),
-      isOcc: c.isOcc || false
-    };
+      isOcc: occValue,
+      qualityPoints: (c.qualityPoints !== undefined && c.qualityPoints !== "") ? parseFloat(c.qualityPoints) : null
+    });
+    
+    console.log(`Course: ${title}, Original isOcc: ${c.isOcc}, Normalized: ${occValue}`);
   });
+
 
   console.log("Parsed student courses:", studentCourses);
 
+  // Compute overall GPA (from parsedData) and OCC GPA (from courses flagged as OCC)
   const cumGPA = parseFloat(parsedData.gpa) || 0;
+  const occCourses = studentCourses.filter(course => course.isOcc);
+  const occGPA = occCourses.length > 0 ? averageGPA(occCourses) : 0;
   const totalUnits = parseFloat(parsedData.earnedHours) || 0;
   const ipUnits = getInProgressUnitsAtOCC(parsedData);
   console.log("Cumulative GPA:", cumGPA, "Total Units:", totalUnits, "In-progress Units:", ipUnits);
+
+  // Use the higher of the overall GPA and OCC GPA
+  const effectiveGPA = Math.max(cumGPA, occGPA);
+  const gpaNote = (effectiveGPA === cumGPA)
+    ? 'Overall GPA used'
+    : 'OCC GPA used';
 
   const allSocieties = [
     'ABG', 'AGS', 'AMG', 'EEO', 'IX', 'MAT', 'MDR', 'NTHS', 'OPS',
@@ -838,6 +847,7 @@ function determineSocietyMembership(parsedData, catalogMap) {
   for (const soc of allSocieties) {
     console.log(`\n--- Checking society: ${soc} ---`);
     const qualCoursesArr = getQualifyingCoursesForSociety(studentCourses, soc, societyConfig, catalogMap);
+
     // Compute metrics from the filtered array using the global averageGPA:
     const qualUnits = qualCoursesArr.reduce((sum, course) => sum + course.creditHours, 0);
     let qualGPA = qualCoursesArr.length > 0 ? averageGPA(qualCoursesArr) : 'N/A';
@@ -845,7 +855,7 @@ function determineSocietyMembership(parsedData, catalogMap) {
 
     // Common conditions:
     const enrolledOK = ipUnits > 0;
-    const gpaOK = cumGPA >= 3.0;
+    const gpaOK = effectiveGPA >= 3.0;
     const unitsOK = totalUnits >= 12;
 
     let qualifies = false;
@@ -938,7 +948,7 @@ function determineSocietyMembership(parsedData, catalogMap) {
       } else {
         // Get the courses that qualify for EEO based on the catalogue mapping.
         const eeoCourses = getQualifyingCoursesForSociety(studentCourses, "EEO", societyConfig, catalogMap);
-        
+
         // Compute the average GPA among these EEO-qualified courses.
         const avgEEOGPA = averageGPA(eeoCourses);
         
