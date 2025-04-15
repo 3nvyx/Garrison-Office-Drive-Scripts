@@ -10,19 +10,19 @@ function wait(ms) { Utilities.sleep(ms); }
 function getBackoffTime(attempt) { return Math.min(1000 * Math.pow(2, attempt), MAX_BACKOFF_MS); }
 
 const SHEET_ID_RANGES = [
-  { range: ['A', 'B'], id: '1pJwsnD0ZMAcQqWdHsR50n_WNqKnw6QbfMMUrrCozRKY' },
-  { range: ['C', 'D'], id: '1oCmx117cWkHEJ7-jI83sAsnBPV1aOqadec8hvCH5pVc' },
-  { range: ['E', 'F'], id: '10fYzN-V5PwPsJICpZ7_wEzO6Wto6qptKmU16EiSnd8M' },
-  { range: ['G', 'H'], id: '1-k4Wxk4-gy4R6WMksj0hgknZT7atyWGw08V2sweeF6U' },
-  { range: ['I', 'J'], id: '1RKk1tmjNkK_ej1FfiGoAbg6TEyBqwjl_g7EnFxvHApU' },
-  { range: ['K', 'L'], id: '1OL-jtdJRWr160Qnw4i1mIIBv_2mJ_41RcDy-2YuRUC8' },
-  { range: ['M', 'N'], id: '14T6XRXEr0DiyM2-4j38Mn7bjYOSun9mfsm5ovtYXtK4' },
-  { range: ['O', 'P'], id: '1_fZUzpKIP9yaCb3Wf6gtf8PsPl2RVqfivn2hRnfNO5A' },
-  { range: ['Q', 'R'], id: '1ph7JEdLOKxnBNqXbS9T4x7rHJr73bT4wKvGrqJzYzQg' },
-  { range: ['S', 'T'], id: '1RYHrjF6wwEykB-gOgNJGjIWr8_UcMqMl7jzfGkIT9s0' },
-  { range: ['U', 'V'], id: '1Rt6skOHPupIGny3Sz1eQ9TPir4R_W2lQJRJqsq147ao' },
-  { range: ['W', 'X'], id: '1LDNwL4buMMuRY7B8gGj3rH3yYsXcCJaURq5fTBNmIok' },
-  { range: ['Y', 'Z'], id: '1NRciVHOi0mM5ADvYEAL2AstMnRWCvHbU26slH0QpPBY' }
+  { range: ['A', 'B'], id: ' example sheet ID ' },
+  { range: ['C', 'D'], id: ' example sheet ID ' },
+  { range: ['E', 'F'], id: ' example sheet ID ' },
+  { range: ['G', 'H'], id: ' example sheet ID ' },
+  { range: ['I', 'J'], id: ' example sheet ID ' },
+  { range: ['K', 'L'], id: ' example sheet ID ' },
+  { range: ['M', 'N'], id: ' example sheet ID ' },
+  { range: ['O', 'P'], id: ' example sheet ID ' },
+  { range: ['Q', 'R'], id: ' example sheet ID ' },
+  { range: ['S', 'T'], id: ' example sheet ID ' },
+  { range: ['U', 'V'], id: ' example sheet ID ' },
+  { range: ['W', 'X'], id: ' example sheet ID ' },
+  { range: ['Y', 'Z'], id: ' example sheet ID ' }
 ];
 // Create the SHEET_IDS mapping dynamically
 const SHEET_IDS = SHEET_ID_RANGES.reduce((acc, { range, id }) => {
@@ -350,20 +350,7 @@ function sendTextToOpenAi(extractedText) {
     {
     role: 'system',
     content: 
-      "You are an assistant extracting structured data from transcripts. " +
-      "Return JSON with the following fields: name, dob, major, earnedHours, gpaHours, qualityPoints, gpa, " +
-      "courses (array of objects with properties: term, code, title, grade, creditHours, qualityPoints, isOcc, institution), " +
-      "inProgressCourses (array of objects with properties: term, code, title, creditHours, isOcc), " +
-      "societies (array of strings), hasAPEnglish. " +
-      "\n\n" +
-      "Important for courses: If a course has 'OC' in the Level column, set isOcc=true and institution='ORANGE COAST COLLEGE'. " +
-      "For other courses, look for institution headers like 'ATTENDED:' or institution names in the transcript section headers. " +
-      "Make sure to include all institutions found in the transcript. " +
-      "\n\n" +
-      "For in-progress courses: These appear in a special 'COURSES IN PROGRESS' section. Only include these courses once in inProgressCourses array. " +
-      "\n\n" +
-      "Important: Process the entire transcript section by section, maintaining the order of institutions as they appear. " +
-      "Ensure all course information including grades, credit hours, and quality points are captured accurately."
+      "Content"
   },
   {
     role: 'user',
@@ -371,7 +358,7 @@ function sendTextToOpenAi(extractedText) {
   }
   ];
   const payload = {
-    model: 'gpt-4o',  // or 'gpt-4', etc.
+    model: 'gpt-4o-mini',
     messages: messages,
     temperature: 0
   };
